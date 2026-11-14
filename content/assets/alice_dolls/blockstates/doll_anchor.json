@@ -1,0 +1,7 @@
+{
+  "variants": {
+    "": {
+      "model": "alice_dolls:block/doll_anchor"
+    }
+  }
+}

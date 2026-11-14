@@ -1,0 +1,16 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "misc",
+  "pattern": [
+    "R R",
+    " C ",
+    "R R"
+  ],
+  "key": {
+    "R": "minecraft:magma_cream",
+    "C": "alice_dolls:doll_core"
+  },
+  "result": {
+    "id": "alice_dolls:fire_protect_bauble"
+  }
+}

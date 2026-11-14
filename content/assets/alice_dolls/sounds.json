@@ -1,0 +1,6 @@
+{
+  "guignol_visit": {
+    "subtitle": "subtitles.alice_dolls.guignol_visit",
+    "sounds": [{ "name": "alice_dolls:guignol_visit" }]
+  }
+}

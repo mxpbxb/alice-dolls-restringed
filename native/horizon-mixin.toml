@@ -1,0 +1,108 @@
+# Alice Dolls Restringed (a port of Alice's Dolls) for Horizon, built by its launcher: `horizon-launcher native-build`.
+# The doll is a named chicken this mod draws and drives: the fork has no living mod entity types and no
+# register_goals hook, so its goals are swapped in through the injection below.
+[mod]
+id = "alice_dolls_native"
+version = "0.28.0"
+
+[compatibility]
+horizon_revision = "1fe4e6fe0252c44efd41d882daee0468389f7d5f"
+
+[api]
+path = "api"
+
+[[module]]
+id = "goals"
+file = "crates/horizon-client/src/mobs.rs"
+name = "alice_doll_goals"
+visibility = "pub"
+source = "goals.rs"
+
+[[injection]]
+id = "doll-goals"
+kind = "HEAD"
+target = "horizon_client_lib::mobs::ai::pre_tick"
+helper = "goal_swap.rs"
+bindings = [
+  { name = "m", ty = "&mut crate::mobs::Mob", value = "&mut *m" },
+  { name = "w", ty = "&crate::mobs::MobWorld<'_>", value = "w" },
+]
+
+# Mob.voice plays ambient sounds without checking Silent: a doll says nothing at all.
+[[injection]]
+id = "doll-voice"
+kind = "HEAD"
+cancellable = true
+target = "horizon_client_lib::mobs::Mob::voice"
+helper = "doll_voice.rs"
+bindings = [{ name = "m", ty = "&crate::mobs::Mob", value = "&*self" }]
+
+# A doll lays no eggs, and makes no plop.
+[[injection]]
+id = "doll-egg"
+kind = "HEAD"
+cancellable = true
+target = "horizon_client_lib::mobs::farm::chicken_egg_step"
+helper = "doll_egg.rs"
+bindings = [{ name = "m", ty = "&crate::mobs::Mob", value = "&*m" }]
+
+[[injection]]
+id = "doll-item-hurt"
+kind = "HEAD"
+cancellable = true
+target = "horizon_client_lib::entities::ItemEntity::hurt"
+helper = "doll_item_hurt.rs"
+bindings = [{ name = "item", ty = "&crate::entities::ItemEntity", value = "&*self" }]
+
+# ...never despawns...
+[[injection]]
+id = "doll-item-age"
+kind = "HEAD"
+target = "horizon_client_lib::entities::ItemEntity::tick_settle"
+helper = "doll_item_age.rs"
+bindings = [{ name = "item", ty = "&mut crate::entities::ItemEntity", value = "&mut *self" }]
+
+# ...and explosions pass it by.
+[[injection]]
+id = "doll-item-blast"
+kind = "HEAD"
+cancellable = true
+target = "horizon_client::game::entity::<ItemEntity as Entity>::ignores_explosion"
+helper = "doll_item_blast.rs"
+bindings = [{ name = "item", ty = "&horizon_client::entities::ItemEntity", value = "&*self" }]
+
+# A doll's inventory screen: its armour slots take only their piece and its shield slot a shield
+# (Touhou Little Maid's maid screen), and each holds one; Moscow's other slots hold 128.
+[[injection]]
+id = "doll-slot-place"
+kind = "HEAD"
+cancellable = true
+target = "horizon_client_lib::lan::menu::View<'_>::may_place"
+helper = "doll_slot_place.rs"
+bindings = [
+  { name = "view", ty = "&crate::lan::menu::View<'_>", value = "&*self" },
+  { name = "i", ty = "usize", value = "i" },
+  { name = "stack", ty = "&crate::items::ItemStack", value = "stack" },
+]
+
+[[injection]]
+id = "doll-slot-max"
+kind = "HEAD"
+cancellable = true
+target = "horizon_client_lib::lan::menu::View<'_>::slot_max"
+helper = "doll_slot_max.rs"
+bindings = [
+  { name = "view", ty = "&crate::lan::menu::View<'_>", value = "&*self" },
+  { name = "i", ty = "usize", value = "i" },
+]
+
+[[injection]]
+id = "doll-slot-pickup"
+kind = "HEAD"
+cancellable = true
+target = "horizon_client_lib::lan::menu::View<'_>::may_pickup"
+helper = "doll_slot_pickup.rs"
+bindings = [
+  { name = "view", ty = "&crate::lan::menu::View<'_>", value = "&*self" },
+  { name = "i", ty = "usize", value = "i" },
+]

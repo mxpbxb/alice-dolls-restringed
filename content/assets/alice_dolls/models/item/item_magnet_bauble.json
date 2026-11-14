@@ -1,0 +1,6 @@
+{
+  "parent": "minecraft:item/generated",
+  "textures": {
+    "layer0": "alice_dolls:item/bauble/item_magnet_bauble"
+  }
+}

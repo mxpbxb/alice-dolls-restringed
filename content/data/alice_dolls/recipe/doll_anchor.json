@@ -1,0 +1,16 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "misc",
+  "pattern": [
+    " C ",
+    " I ",
+    "III"
+  ],
+  "key": {
+    "C": "alice_dolls:doll_core",
+    "I": "minecraft:iron_ingot"
+  },
+  "result": {
+    "id": "alice_dolls:doll_anchor"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "misc",
+  "pattern": [
+    "P ",
+    " D"
+  ],
+  "key": {
+    "P": "minecraft:diamond_pickaxe",
+    "D": "alice_dolls:horai_doll"
+  },
+  "result": {
+    "id": "alice_dolls:diamond_horai_doll"
+  }
+}

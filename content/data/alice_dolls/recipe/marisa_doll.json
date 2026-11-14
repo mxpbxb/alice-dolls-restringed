@@ -1,0 +1,18 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "misc",
+  "pattern": [
+    "AWD",
+    "WHW",
+    "DW "
+  ],
+  "key": {
+    "A": "minecraft:fire_charge",
+    "W": "#minecraft:wool",
+    "H": "alice_dolls:doll_core",
+    "D": "minecraft:diamond"
+  },
+  "result": {
+    "id": "alice_dolls:marisa_doll"
+  }
+}

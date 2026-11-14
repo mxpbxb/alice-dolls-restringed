@@ -1,0 +1,51 @@
+{
+  "template": "minecraft:glass",
+  "properties": {
+    "hardness": 0.0,
+    "explosion_resistance": 0.0,
+    "sounds": "minecraft:scaffolding"
+  },
+  "shapes": {
+    "default": [
+      [
+        0,
+        0,
+        0,
+        1,
+        1,
+        1
+      ]
+    ]
+  },
+  "collision_shapes": {
+    "properties": [
+      "cover"
+    ],
+    "values": {
+      "true": [
+        [
+          0,
+          0,
+          0,
+          1,
+          1,
+          1
+        ]
+      ]
+    },
+    "default": []
+  },
+  "item": false,
+  "state_properties": {
+    "cover": {
+      "type": "enum",
+      "values": [
+        "false",
+        "true"
+      ]
+    }
+  },
+  "default_state": {
+    "cover": "false"
+  }
+}

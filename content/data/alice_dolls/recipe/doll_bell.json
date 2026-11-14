@@ -1,0 +1,16 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "misc",
+  "pattern": [
+    " S ",
+    "GGG",
+    "G G"
+  ],
+  "key": {
+    "S": "minecraft:stick",
+    "G": "minecraft:gold_ingot"
+  },
+  "result": {
+    "id": "alice_dolls:doll_bell"
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "misc",
+  "pattern": [
+    "AWD",
+    "WHW",
+    "DW "
+  ],
+  "key": {
+    "A": "minecraft:paper",
+    "W": "#minecraft:wool",
+    "H": "alice_dolls:doll_core",
+    "D": "minecraft:diamond"
+  },
+  "result": {
+    "id": "alice_dolls:reimu_doll"
+  }
+}

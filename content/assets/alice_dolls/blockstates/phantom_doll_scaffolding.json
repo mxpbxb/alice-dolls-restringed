@@ -1,0 +1,10 @@
+{
+  "variants": {
+    "cover=false": {
+      "model": "minecraft:block/scaffolding_stable"
+    },
+    "cover=true": {
+      "model": "minecraft:block/scaffolding_stable"
+    }
+  }
+}

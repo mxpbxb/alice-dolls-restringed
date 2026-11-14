@@ -1,0 +1,16 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "misc",
+  "pattern": [
+    "R R",
+    " C ",
+    "R R"
+  ],
+  "key": {
+    "R": "minecraft:golden_apple",
+    "C": "alice_dolls:doll_core"
+  },
+  "result": {
+    "id": "alice_dolls:ultramarine_orb_elixir"
+  }
+}

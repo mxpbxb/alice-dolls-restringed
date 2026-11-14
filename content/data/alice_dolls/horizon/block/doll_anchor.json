@@ -1,0 +1,21 @@
+{
+  "template": "minecraft:lantern",
+  "properties": {
+    "hardness": 2.0,
+    "explosion_resistance": 3600000.0,
+    "sounds": "minecraft:iron_block"
+  },
+  "shapes": {
+    "default": [
+      [
+        0.3125,
+        0,
+        0.3125,
+        0.6875,
+        1.0,
+        0.6875
+      ]
+    ]
+  },
+  "item": true
+}

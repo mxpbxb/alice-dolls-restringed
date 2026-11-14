@@ -1,0 +1,6 @@
+{
+  "parent": "minecraft:item/generated",
+  "textures": {
+    "layer0": "alice_dolls:item/bauble/fall_protect_bauble"
+  }
+}
