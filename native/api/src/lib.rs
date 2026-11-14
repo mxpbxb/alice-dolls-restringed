@@ -531,6 +531,129 @@ const FAVOUR_GROWTH: f64 = 1.75;
 /// What one Point item is worth.
 const POINT_FAVOUR: u32 = 5;
 
+fn cooked(item: &str) -> Option<&'static str> {
+    let short = item.strip_prefix("minecraft:")?;
+    Some(match short {
+        "beef" => "minecraft:cooked_beef",
+        "porkchop" => "minecraft:cooked_porkchop",
+        "chicken" => "minecraft:cooked_chicken",
+        "mutton" => "minecraft:cooked_mutton",
+        "rabbit" => "minecraft:cooked_rabbit",
+        "cod" => "minecraft:cooked_cod",
+        "salmon" => "minecraft:cooked_salmon",
+        "potato" => "minecraft:baked_potato",
+        "kelp" => "minecraft:dried_kelp",
+        "chorus_fruit" => "minecraft:popped_chorus_fruit",
+        "iron_ore" | "deepslate_iron_ore" | "raw_iron" => "minecraft:iron_ingot",
+        "gold_ore" | "deepslate_gold_ore" | "nether_gold_ore" | "raw_gold" => "minecraft:gold_ingot",
+        "copper_ore" | "deepslate_copper_ore" | "raw_copper" => "minecraft:copper_ingot",
+        "coal_ore" | "deepslate_coal_ore" => "minecraft:coal",
+        "diamond_ore" | "deepslate_diamond_ore" => "minecraft:diamond",
+        "emerald_ore" | "deepslate_emerald_ore" => "minecraft:emerald",
+        "lapis_ore" | "deepslate_lapis_ore" => "minecraft:lapis_lazuli",
+        "redstone_ore" | "deepslate_redstone_ore" => "minecraft:redstone",
+        "nether_quartz_ore" => "minecraft:quartz",
+        "ancient_debris" => "minecraft:netherite_scrap",
+        "sand" | "red_sand" => "minecraft:glass",
+        "cobblestone" => "minecraft:stone",
+        "stone" => "minecraft:smooth_stone",
+        "cobbled_deepslate" => "minecraft:deepslate",
+        "stone_bricks" => "minecraft:cracked_stone_bricks",
+        "deepslate_bricks" => "minecraft:cracked_deepslate_bricks",
+        "deepslate_tiles" => "minecraft:cracked_deepslate_tiles",
+        "nether_bricks" => "minecraft:cracked_nether_bricks",
+        "polished_blackstone_bricks" => "minecraft:cracked_polished_blackstone_bricks",
+        "sandstone" => "minecraft:smooth_sandstone",
+        "red_sandstone" => "minecraft:smooth_red_sandstone",
+        "quartz_block" => "minecraft:smooth_quartz",
+        "basalt" => "minecraft:smooth_basalt",
+        "clay_ball" => "minecraft:brick",
+        "clay" => "minecraft:terracotta",
+        "netherrack" => "minecraft:nether_brick",
+        "cactus" => "minecraft:green_dye",
+        "sea_pickle" => "minecraft:lime_dye",
+        "wet_sponge" => "minecraft:sponge",
+        "chorus_flower" => "minecraft:popped_chorus_fruit",
+        "resin_clump" => "minecraft:resin_brick",
+        s if s.ends_with("_log") || s.ends_with("_wood") || s.ends_with("_stem") || s.ends_with("_hyphae") => {
+            "minecraft:charcoal"
+        }
+        s if s.ends_with("_terracotta") && !s.ends_with("glazed_terracotta") && s != "terracotta" => {
+            return glazed(s);
+        }
+        _ => return None,
+    })
+}
+
+/// A coloured terracotta's glazed kind.
+fn glazed(short: &str) -> Option<&'static str> {
+    const COLOURS: [&str; 16] = [
+        "white", "orange", "magenta", "light_blue", "yellow", "lime", "pink", "gray", "light_gray", "cyan", "purple",
+        "blue", "brown", "green", "red", "black",
+    ];
+    const GLAZED: [&str; 16] = [
+        "minecraft:white_glazed_terracotta", "minecraft:orange_glazed_terracotta", "minecraft:magenta_glazed_terracotta",
+        "minecraft:light_blue_glazed_terracotta", "minecraft:yellow_glazed_terracotta", "minecraft:lime_glazed_terracotta",
+        "minecraft:pink_glazed_terracotta", "minecraft:gray_glazed_terracotta", "minecraft:light_gray_glazed_terracotta",
+        "minecraft:cyan_glazed_terracotta", "minecraft:purple_glazed_terracotta", "minecraft:blue_glazed_terracotta",
+        "minecraft:brown_glazed_terracotta", "minecraft:green_glazed_terracotta", "minecraft:red_glazed_terracotta",
+        "minecraft:black_glazed_terracotta",
+    ];
+    let colour = short.strip_suffix("_terracotta")?;
+    COLOURS.iter().position(|c| *c == colour).map(|i| GLAZED[i])
+}
+
+/// Within this of the camera, a doll riding on a head is not drawn (first person); in third person
+/// the camera is further off and it is.
+const RIDE_HIDE_RANGE: f64 = 1.5;
+
+const COOK_TICKS: u32 = 200;
+static COOK_TICKS_LEFT: LazyLock<Mutex<HashMap<u32, u32>>> = LazyLock::new(Default::default);
+
+fn cook(host: &mut dyn Host, id: u32) {
+    let due = COOK_TICKS_LEFT.lock().is_ok_and(|mut t| {
+        let n = t.entry(id).or_default();
+        *n = (*n + 1) % COOK_TICKS;
+        *n == 0
+    });
+    if !due || goals::chest_open() == Some(id) {
+        return;
+    }
+    let holder = Holder::Entity(id);
+    let mut data = DOLL.get(host, holder).unwrap_or_default();
+    let mut items = goals::inventory(id).unwrap_or_else(|| data.items.clone());
+    let Some((slot, result)) = items
+        .iter()
+        .enumerate()
+        .find_map(|(i, s)| s.as_ref().filter(|s| s.count > 0 && s.extra.is_none()).and_then(|s| Some((i, cooked(&s.item)?))))
+    else {
+        return;
+    };
+    let out = ItemStack::new(result, 1);
+    let max = host.max_stack_size(result).unwrap_or(64);
+    // Room for what it makes, counting the slot the last of the raw item leaves empty.
+    let last = items[slot].as_ref().is_some_and(|s| s.count == 1);
+    if room_for(&items, &out, max) == 0 && !last {
+        return;
+    }
+    if let Some(s) = items[slot].as_mut() {
+        s.count -= 1;
+        if s.count == 0 {
+            items[slot] = None;
+        }
+    }
+    store_some(&mut items, &out, max);
+    data.items = items;
+    goals::put_inventory(id, data.items.clone());
+    if let Some(doll) = doll_of(host, id) {
+        remember(id, doll, &data);
+    }
+    if let Some(at) = host.entity(id).and_then(|e| host.entity_position(e)) {
+        host.play_local_sound("minecraft:block.furnace.fire_crackle", at, 0.5, 1.0, 0);
+    }
+    let _ = DOLL.set(host, holder, data);
+}
+
 /// The head a mob of `kind` leaves when a doll kills it: only the mobs that have one in the game.
 fn mob_head(kind: &str) -> Option<&'static str> {
     Some(match kind {
@@ -1337,7 +1460,7 @@ impl Mod {
         if let Some(at) = host.entity(id).and_then(|e| host.entity_position(e)) {
             host.play_local_sound("minecraft:entity.player.levelup", at, 0.8, 1.2, 0);
         }
-        say(host, id, data, 1, &format!("Favour level {after}!"));
+        say(host, id, data, 1, &format!("Love level {after}!"));
         let Some(doll) = doll_of(host, id) else { return };
         if after.saturating_sub(data.form_level) < LEVELS_PER_FORM {
             remember(id, doll, data);
@@ -1466,17 +1589,17 @@ impl Mod {
         match held {
             // The original let a name tag rename a doll; here the name is what makes it one.
             Some("minecraft:name_tag") => {}
-            // A Point or Power item, dropped by fairies and other Touhou mobs: favour. Sneak to give
-            // the stack.
+            // A Point or Power item, dropped by fairies and other Touhou mobs: favour. A right-click
+            // gives the stack; sneak to give a little, one at a time.
             Some(item) if point_favour(item).is_some() => {
                 let worth = point_favour(item).unwrap_or(POINT_FAVOUR);
                 let held_count = stack.map_or(1, |s| s.count.max(1));
-                let n = if goals::player_sneaking() { held_count } else { 1 };
+                let n = if goals::player_sneaking() { 1 } else { held_count };
                 let given = if player.game_mode == 1 { n } else { host.take_items(item, n) };
                 if given > 0 {
                     self.add_favour(host, id, &mut data, given * worth);
                     let (level, into, need) = favour_level(data.favour);
-                    let text = format!("{name} : favour level {level} ({into}/{need})");
+                    let text = format!("{name} : love level {level} ({into}/{need})");
                     host.action_bar(player.uuid, Text::literal(text));
                 }
             }
@@ -2532,6 +2655,14 @@ impl Hooks for Mod {
             goals::snap(id);
             return Flow::Cancel;
         }
+        // Hit by its own owner: the food it eats to heal that earns it no love.
+        if event.kind == KIND
+            && let Some(player) = host.acting_player()
+            && known(id).is_some_and(|k| k.owner == player.uuid)
+            && host.held().is_none_or(|(item, _, _)| item != DOLL_CORE)
+        {
+            goals::owner_hurt(id);
+        }
         if event.kind != KIND
             || !DOLL.has(host, Holder::Entity(id)).unwrap_or(false)
             || host.held().is_none_or(|(item, _, _)| item != DOLL_CORE)
@@ -2610,6 +2741,10 @@ impl Hooks for Mod {
         }
         for (from, level, text) in goals::take_messages() {
             let data = DOLL.get(host, Holder::Entity(from)).unwrap_or_default();
+            // On its owner's head, a doll keeps its reports to itself: only what must be said is.
+            if data.mode == goals::RIDE && level > 0 {
+                continue;
+            }
             say(host, from, &data, level, &text);
         }
         // A wheel turn on a long doll inventory: the screen closes (keeping what it showed) and opens
@@ -2682,12 +2817,12 @@ impl Hooks for Mod {
                 goals::set_owner_at(owner, players.iter().find(|p| p.uuid == owner).map(|p| p.position));
             }
         }
-        for (from, at, healed) in goals::take_eaten() {
+        for (from, at, healed, love) in goals::take_eaten() {
             if let Some(level) = host.entity(from).and_then(|e| host.entity_level(e)) {
                 host.level_play_sound(level, "minecraft:entity.generic.eat", at, 6, 0.6, 1.3);
             }
             let holder = Holder::Entity(from);
-            if DOLL.has(host, holder).unwrap_or(false) {
+            if love && DOLL.has(host, holder).unwrap_or(false) {
                 let mut data = DOLL.get(host, holder).unwrap_or_default();
                 self.add_favour(host, from, &mut data, healed.round().max(1.0) as u32);
                 let _ = DOLL.set(host, holder, data);
@@ -2802,6 +2937,9 @@ impl Hooks for Mod {
         if russia {
             let to = (data.bound != 0).then(|| UUIDS.lock().ok().and_then(|u| u.get(&data.bound).copied())).flatten();
             goals::set_bound(id, to);
+        }
+        if known(id).is_some_and(|k| k.doll.name == goals::GRAND_GUIGNOL) {
+            cook(host, id);
         }
         // Every doll at work picks up what is dropped around it.
         if data.enabled && matches!(data.mode, goals::PATROL | goals::FOLLOW | goals::SECRET | goals::SECRET_ALL) {
@@ -3021,6 +3159,16 @@ impl Hooks for Mod {
         if goals::on_mission(event.mob.id) {
             return Flow::Cancel;
         }
+        // A doll on the head isn't drawn from the eyes it sits over: it would fill the view.
+        if goals::riding(event.mob.id)
+            && let Some(camera) = host.camera()
+            && let Some(at) = host.entity(event.mob.id).and_then(|e| host.entity_position(e))
+        {
+            let d2: f64 = (0..3).map(|i| (camera.position[i] - at[i]).powi(2)).sum();
+            if d2 < RIDE_HIDE_RANGE * RIDE_HIDE_RANGE {
+                return Flow::Cancel;
+            }
+        }
         let name = event.mob.custom_name;
         let Some(doll) = name.and_then(doll_named) else {
             if name.is_some_and(|n| n.contains("Doll")) && first_time(&RENDER_SEEN, event.mob.id) {
@@ -3081,6 +3229,17 @@ mod tests {
         assert_eq!(decode(&encode(&data).unwrap()).unwrap(), data);
         let data = DollData { owner: 7 << 64, ..DollData::default() };
         assert_eq!(decode(&encode(&data).unwrap()).unwrap(), data);
+    }
+
+    #[test]
+    fn grand_guignol_cooks_as_a_furnace_would() {
+        assert_eq!(cooked("minecraft:beef"), Some("minecraft:cooked_beef"));
+        assert_eq!(cooked("minecraft:raw_iron"), Some("minecraft:iron_ingot"));
+        assert_eq!(cooked("minecraft:oak_log"), Some("minecraft:charcoal"));
+        assert_eq!(cooked("minecraft:blue_terracotta"), Some("minecraft:blue_glazed_terracotta"));
+        assert_eq!(cooked("minecraft:blue_glazed_terracotta"), None);
+        assert_eq!(cooked("minecraft:cooked_beef"), None);
+        assert_eq!(cooked("thkaguyamod:point_item"), None);
     }
 
     #[test]

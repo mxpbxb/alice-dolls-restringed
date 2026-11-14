@@ -185,6 +185,11 @@ static INVENTORIES: LazyLock<Mutex<HashMap<u32, Vec<Option<ItemStack>>>>> = Lazy
 static CHANGED: LazyLock<Mutex<HashSet<u32>>> = LazyLock::new(Default::default);
 
 /// The api crate's copy of doll `id`'s inventory.
+/// Whether doll `id` is riding on its owner's head.
+pub fn riding(id: u32) -> bool {
+    state(id).is_some_and(|s| s.mode == RIDE && s.enabled)
+}
+
 pub fn put_inventory(id: u32, items: Vec<Option<ItemStack>>) {
     if let Ok(mut all) = INVENTORIES.lock() {
         all.insert(id, items);
@@ -340,16 +345,31 @@ pub fn food_heal(item: &str) -> Option<f32> {
     FOODS.iter().find(|(f, _)| *f == item).map(|(_, h)| *h)
 }
 
-/// Dolls that ate since the last call, and where, for the api crate to play the sound.
-static ATE: Mutex<Vec<(u32, [f64; 3], f32)>> = Mutex::new(Vec::new());
+/// Dolls that ate since the last call, where, how much the food heals, and whether it earns love,
+/// for the api crate to play the sound and add the love.
+static ATE: Mutex<Vec<(u32, [f64; 3], f32, bool)>> = Mutex::new(Vec::new());
 
-pub fn take_eaten() -> Vec<(u32, [f64; 3], f32)> {
+pub fn take_eaten() -> Vec<(u32, [f64; 3], f32, bool)> {
     ATE.lock().map(|mut a| std::mem::take(&mut *a)).unwrap_or_default()
+}
+
+/// Dolls their own owner has hit and that aren't whole again: food eaten to heal that earns no love.
+static OWNER_HURT: LazyLock<Mutex<HashSet<u32>>> = LazyLock::new(Default::default);
+
+/// Doll `id` was hit by its owner.
+pub fn owner_hurt(id: u32) {
+    if let Ok(mut h) = OWNER_HURT.lock() {
+        h.insert(id);
+    }
+}
+
+fn hurt_by_owner(id: u32) -> bool {
+    OWNER_HURT.lock().is_ok_and(|h| h.contains(&id))
 }
 
 /// Eats the food that best fills what it has lost without wasting much: the smallest that heals it
 /// fully, or else the biggest it has.
-fn eat(m: &mut Mob, max: f32) {
+fn eat(m: &mut Mob, max: f32, love: bool) {
     let missing = max - m.health;
     let Some(items) = inventory(m.id) else { return };
     let mut foods: Vec<(Arc<str>, f32)> =
@@ -362,7 +382,7 @@ fn eat(m: &mut Mob, max: f32) {
     if take_one(m.id, &item) {
         m.health = (m.health + heal).min(max);
         if let Ok(mut a) = ATE.lock() {
-            a.push((m.id, here(m), heal));
+            a.push((m.id, here(m), heal, love));
         }
     }
 }
@@ -591,6 +611,9 @@ pub fn is_doll_mob(m: &Mob) -> bool {
     kind_of(m).is_some()
 }
 
+/// Five minutes: how often a doll at work eats.
+const MEAL_TICKS: u32 = 6000;
+
 /// A player has 20 health: every doll has half as much again.
 const DOLL_HEALTH: f32 = 30.0;
 /// The Goliath doll has three times a player's, and a tenth more; the Netherite one 5% on that.
@@ -643,8 +666,16 @@ fn tick_doll(m: &mut Mob, w: &MobWorld) {
     }
     let Some(state) = state(m.id) else { return };
     // Hurt, it eats from its own inventory: once every two seconds, healing what the food fills.
+    // Whole again: what its owner did is forgotten.
+    if m.health >= health && OWNER_HURT.lock().is_ok_and(|mut h| h.remove(&m.id)) {}
+    // Healing what its owner did to it earns no love; healing a mob's or another player's blows does.
     if m.alive() && m.health <= health - 1.0 && m.age % 40 == 0 {
-        eat(m, health);
+        eat(m, health, !hurt_by_owner(m.id));
+    }
+    // At work (on patrol, following or on the head), it eats a piece of food every five minutes,
+    // hungry or not.
+    if m.alive() && matches!(state.mode, PATROL | FOLLOW | RIDE) && m.age > 0 && m.age % MEAL_TICKS == 0 {
+        eat(m, health, true);
     }
     if kind == Kind::Wakasagi && m.fluids.in_water && state.mode != RIDE {
         swim(m);

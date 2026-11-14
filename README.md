@@ -1,7 +1,7 @@
 # Alice Dolls Restringed
 
 Alice's dolls for [Horizon](https://playhorizon.dev): a port of **Alice's Dolls** (1.7.10-kog3, by
-iwa_yukinoshita), used with permission, with its extra dolls and new ones, restrung with favour
+iwa_yukinoshita), used with permission, with its extra dolls and new ones, restrung with love
 levels, evolutions and new jobs.
 
 ## Two parts
@@ -34,14 +34,18 @@ Each recipe is the item in the top left, wool (Goliath: iron blocks), and a Doll
 
 Right-click a doll empty-handed to switch modes (Standby, Patrol, Follow, Rideon); with a Doll Core
 to turn its AI on or off; with a chest to open its inventory. Sneak and right-click it empty-handed
-to pick it up: like a shulker box, its item keeps its inventory, favour and experience.
+to pick it up: like a shulker box, its item keeps its inventory, love and experience. A doll on
+your head stays out of your view in first person and keeps its reports to itself.
 
-## Favour
+## Love
 
-Dolls eat food from their inventory to heal, and pick up experience orbs, which you take back with a
-glass bottle. Feeding them and giving them point and power items (dropped by
+Dolls eat food from their inventory to heal, and at work (on patrol, following or on your head) a
+piece every five minutes. They pick up experience orbs, which you take back with a glass bottle.
+Eating earns love, but not healing what you did to them yourself: hit your own doll, and the food it
+eats until it is whole again earns nothing. Point and power items (dropped by
 [Touhou Mobs](https://github.com/mxpbxb/touhou-mobs), from
-[Touhou Items](https://github.com/mxpbxb/touhou-items)) earns favour; sneak to give the whole stack.
+[Touhou Items](https://github.com/mxpbxb/touhou-items)) earn love too: right-click to give the stack,
+sneak-click to give one.
 Each level takes three quarters more than the last, and gives 3 more attack and 5 more health, each
 then 10% more, and makes the working dolls faster and stronger: mining, blasting, farming and fishing.
 Every three levels, a doll with a next form evolves. A doll's name tag shows its level and how far it
