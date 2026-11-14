@@ -58,7 +58,7 @@ head, and picks it up.
 
 `content/` is the content mod; build it with `cargo horizon-mod build`. `native/` is the native mod,
 built by the Horizon launcher (`native-build`), pinned to one Horizon revision: `api/` keeps each
-doll's owner, mode, inventory and favour and draws its model, and the mixin files (`goals.rs` and the
+doll's owner, mode, inventory and love and draws its model, and the mixin files (`goals.rs` and the
 hooks) give the dolls their jobs.
 
 ## Credits
