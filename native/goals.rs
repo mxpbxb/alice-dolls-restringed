@@ -1541,8 +1541,9 @@ fn is_air(name: &str) -> bool {
 }
 
 /// `targetBlockRegex` (`ore.+|netherquartz`): every ore, deepslate and nether ones included.
+/// An ore, to report and mine: anything named one, and ancient debris.
 fn is_ore(name: &str) -> bool {
-    name.ends_with("_ore")
+    name.ends_with("_ore") || short(name) == "ancient_debris"
 }
 
 fn short(name: &str) -> &str {
@@ -3300,6 +3301,9 @@ fn ground(w: &MobWorld, x: i32, y: i32, z: i32) -> Option<i32> {
 /// closer she leaves for another spot. A finished (or left) shaft gets a column of phantom doll scaffolding up one corner, to
 /// climb out by; it drops nothing when broken. Then she teleports back to her owner and starts again behind them.
 /// The ores drop where they were, for the dolls to pick up; the rock and earth she leaves.
+/// Ticks a Netherite Horai waits, once put on patrol, before she teleports off to quarry: four seconds.
+const QUARRY_DELAY: i32 = 80;
+
 #[derive(Clone, Debug, Default)]
 struct Quarry {
     /// The shaft's middle column, at the ground block it starts from.
@@ -3458,9 +3462,10 @@ impl Goal for Quarry {
         self.can_use(m, cx)
     }
     fn start(&mut self, _: &mut Mob, _: &mut Cx) {
-        // Each patrol starts a new shaft behind the owner.
+        // Each patrol starts a new shaft behind the owner, four seconds on: time to click on through
+        // to Follow or Rideon before she's gone.
         self.site = None;
-        self.wait = 0;
+        self.wait = QUARRY_DELAY;
     }
     fn stop(&mut self, m: &mut Mob, cx: &mut Cx) {
         self.dig.cancel(m, cx);

@@ -23,7 +23,7 @@ use horizon_client::mod_api::{
     CameraPoseEvent, HudMode, RenderNameTagEvent,
     AttachmentCodec, AttachmentError, AttachmentType, AttackEntityEvent, Compound,
     EntityTickListenedEvent, EntityTickPostEvent, Flow, Holder, Hooks, Host, InteractEntityEvent,
-    ItemStack, LivingIncomingDamageEvent, LootDropsEvent, MenuClickedEvent, MenuClosedEvent, MenuInputClosedEvent,
+    ItemStack, LivingIncomingDamageEvent, LootDropsEvent, PlayerRespawnedEvent, MenuClickedEvent, MenuClosedEvent, MenuInputClosedEvent,
     ScreenRenderPostEvent, ScreenMouseScrolledPreEvent, RightClickBlockEvent,
     MobSubmitEvent, NativeServerPlayer, PlaceBlockEvent, StackData, Tag, Text, TooltipEvent,
     UseItemEvent, UseItemOnEvent, WorldSubmitEvent, Direction, EquipmentSlot, LivingDeathEvent, NativeEffect, ClientTickPostEvent,
@@ -530,6 +530,34 @@ const FAVOUR_FIRST: f64 = 100.0;
 const FAVOUR_GROWTH: f64 = 1.75;
 /// What one Point item is worth.
 const POINT_FAVOUR: u32 = 5;
+
+/// Whether `bauble` turns away harm of `damage_type` (Touhou Little Maid's `onInjured`): from the
+/// doll wearing it, and from its owner while it rides on their head.
+fn bauble_guards(bauble: &str, damage_type: &str) -> bool {
+    let ty = damage_type.strip_prefix("minecraft:").unwrap_or(damage_type);
+    let projectile = matches!(
+        ty,
+        "arrow" | "trident" | "mob_projectile" | "fireball" | "unattributed_fireball" | "wither_skull" | "thrown" | "spit" | "wind_charge" | "fireworks"
+    );
+    match bauble {
+        "alice_dolls:fire_protect_bauble" => {
+            matches!(ty, "in_fire" | "on_fire" | "lava" | "hot_floor" | "campfire" | "fireball" | "unattributed_fireball")
+        }
+        "alice_dolls:explosion_protect_bauble" => matches!(ty, "explosion" | "player_explosion" | "fireworks" | "bad_respawn_point"),
+        "alice_dolls:projectile_protect_bauble" => projectile,
+        "alice_dolls:magic_protect_bauble" => matches!(ty, "magic" | "indirect_magic" | "wither" | "dragon_breath" | "sonic_boom"),
+        "alice_dolls:fall_protect_bauble" => matches!(ty, "fall" | "stalagmite"),
+        "alice_dolls:drown_protect_bauble" => ty == "drown",
+        // NimbleFabricBauble: a shot it dodges by teleporting.
+        "alice_dolls:nimble_fabric" => projectile,
+        _ => false,
+    }
+}
+
+/// Each doll riding on a head, and the entity id of the player it sits on, for the damage hook,
+/// which only knows entity ids.
+static HEAD_RIDERS: LazyLock<Mutex<HashMap<u32, i32>>> = LazyLock::new(Default::default);
+static RIDER_CHECK: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 fn cooked(item: &str) -> Option<&'static str> {
     let short = item.strip_prefix("minecraft:")?;
@@ -2938,6 +2966,17 @@ impl Hooks for Mod {
             let to = (data.bound != 0).then(|| UUIDS.lock().ok().and_then(|u| u.get(&data.bound).copied())).flatten();
             goals::set_bound(id, to);
         }
+        // On a head: whose, for the baubles it shares with them.
+        if !goals::riding(id) {
+            HEAD_RIDERS.lock().ok().map(|mut r| r.remove(&id));
+        } else if HEAD_RIDERS.lock().is_ok_and(|r| !r.contains_key(&id)) || RIDER_CHECK.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 20 == 0 {
+            let player = known(id)
+                .and_then(|k| host.server_players().into_iter().find(|p| p.uuid == k.owner))
+                .map_or(0, |p| p.entity_id);
+            if player != 0 {
+                HEAD_RIDERS.lock().ok().map(|mut r| r.insert(id, player));
+            }
+        }
         if known(id).is_some_and(|k| k.doll.name == goals::GRAND_GUIGNOL) {
             cook(host, id);
         }
@@ -3018,28 +3057,26 @@ impl Hooks for Mod {
             && let Ok(id) = u32::try_from(event.entity)
             && known(id).is_some()
         {
-            let ty = event.damage_type.strip_prefix("minecraft:").unwrap_or(event.damage_type);
-            let projectile = matches!(
-                ty,
-                "arrow" | "trident" | "mob_projectile" | "fireball" | "unattributed_fireball" | "wither_skull" | "thrown" | "spit" | "wind_charge" | "fireworks"
-            );
-            let guards = |bauble: &str| match bauble {
-                "alice_dolls:fire_protect_bauble" => matches!(ty, "in_fire" | "on_fire" | "lava" | "hot_floor" | "campfire" | "fireball" | "unattributed_fireball"),
-                "alice_dolls:explosion_protect_bauble" => matches!(ty, "explosion" | "player_explosion" | "fireworks" | "bad_respawn_point"),
-                "alice_dolls:projectile_protect_bauble" => projectile,
-                "alice_dolls:magic_protect_bauble" => matches!(ty, "magic" | "indirect_magic" | "wither" | "dragon_breath" | "sonic_boom"),
-                "alice_dolls:fall_protect_bauble" => matches!(ty, "fall" | "stalagmite"),
-                "alice_dolls:drown_protect_bauble" => ty == "drown",
-                // NimbleFabricBauble: a shot it dodges by teleporting.
-                "alice_dolls:nimble_fabric" => projectile,
-                _ => false,
-            };
             let worn = goals::baubles(id);
-            if let Some(b) = worn.iter().find(|b| guards(b)) {
+            if let Some(b) = worn.iter().find(|b| bauble_guards(b, event.damage_type)) {
                 // NimbleFabricBauble: a shot it dodges by teleporting.
                 if &**b == "alice_dolls:nimble_fabric" {
                     goals::request_dodge(id);
                 }
+                return Flow::Cancel;
+            }
+        }
+        // A doll on its owner's head shares its baubles with them: the harm they turn away from the
+        // doll, they turn away from the head it sits on (lava and fire too, with the fire bauble).
+        if event.kind == "minecraft:player"
+            && event.entity != 0
+            && let Ok(riders) = HEAD_RIDERS.lock()
+        {
+            let guarded = riders
+                .iter()
+                .filter(|(d, p)| i64::from(**p) == i64::from(event.entity) && goals::riding(**d))
+                .any(|(d, _)| goals::baubles(*d).iter().any(|b| bauble_guards(b, event.damage_type)));
+            if guarded {
                 return Flow::Cancel;
             }
         }
@@ -3071,6 +3108,33 @@ impl Hooks for Mod {
         }
         let ooedo = u32::try_from(event.entity).ok().and_then(known).is_some_and(|k| k.doll.name == goals::OOEDO);
         if ooedo { Flow::Cancel } else { Flow::Continue }
+    }
+
+    /// Its owner respawned: every doll that was following them or on their head comes to them, and
+    /// carries on as it was.
+    fn player_respawned(&self, host: &mut dyn Host, event: &mut PlayerRespawnedEvent<'_>) {
+        let owner = event.player;
+        let Some(player) = host.server_players().into_iter().find(|p| p.uuid == owner) else { return };
+        let ids: Vec<u32> = KNOWN
+            .lock()
+            .map(|k| k.iter().filter(|(_, k)| k.owner == owner).map(|(id, _)| *id).collect())
+            .unwrap_or_default();
+        let mut n = 0u32;
+        for id in ids {
+            let holder = Holder::Entity(id);
+            if !DOLL.has(host, holder).unwrap_or(false) {
+                continue;
+            }
+            let data = DOLL.get(host, holder).unwrap_or_default();
+            if !data.enabled || !matches!(data.mode, goals::FOLLOW | goals::RIDE) {
+                continue;
+            }
+            let a = f64::from(n) * 2.4;
+            let at = [player.position[0] + a.cos() * 0.8, player.position[1], player.position[2] + a.sin() * 0.8];
+            if host.teleport_mob(&player.dimension, id, at) {
+                n += 1;
+            }
+        }
     }
 
     /// The Ultramarine Orb Elixir and the Totem of Undying in a doll's bauble slot: it doesn't die,
@@ -3229,6 +3293,15 @@ mod tests {
         assert_eq!(decode(&encode(&data).unwrap()).unwrap(), data);
         let data = DollData { owner: 7 << 64, ..DollData::default() };
         assert_eq!(decode(&encode(&data).unwrap()).unwrap(), data);
+    }
+
+    #[test]
+    fn baubles_guard_their_harm() {
+        assert!(bauble_guards("alice_dolls:fire_protect_bauble", "minecraft:lava"));
+        assert!(bauble_guards("alice_dolls:fire_protect_bauble", "minecraft:on_fire"));
+        assert!(!bauble_guards("alice_dolls:fire_protect_bauble", "minecraft:fall"));
+        assert!(bauble_guards("alice_dolls:fall_protect_bauble", "minecraft:fall"));
+        assert!(bauble_guards("alice_dolls:projectile_protect_bauble", "minecraft:arrow"));
     }
 
     #[test]

@@ -19,7 +19,7 @@ Each recipe is the item in the top left, wool (Goliath: iron blocks), and a Doll
 | Doll | Crafted with | What it does |
 |---|---|---|
 | Shanghai | golden sword | Fights hostile mobs, shears sheep, reports the mobs around it. Evolves into Goliath |
-| Horai | golden pickaxe | Finds ore and digs to it. Evolves into Diamond, then Netherite Horai |
+| Horai | golden pickaxe | Finds ore (ancient debris too) and digs to it. Evolves into Diamond, then Netherite Horai, which waits four seconds before heading off to its quarry so you can give it another order |
 | Ooedo | TNT | Walks up to hostile mobs and explodes; no explosion hurts it |
 | Germany | golden axe | Finds trees and chops them down |
 | London | eye of ender | Reports the spawners above and below it |
@@ -35,7 +35,9 @@ Each recipe is the item in the top left, wool (Goliath: iron blocks), and a Doll
 Right-click a doll empty-handed to switch modes (Standby, Patrol, Follow, Rideon); with a Doll Core
 to turn its AI on or off; with a chest to open its inventory. Sneak and right-click it empty-handed
 to pick it up: like a shulker box, its item keeps its inventory, love and experience. A doll on
-your head stays out of your view in first person and keeps its reports to itself.
+your head stays out of your view in first person and keeps its reports to itself, and its baubles
+protect you too (the fire bauble from lava and fire). When you respawn, the dolls that were following
+you or on your head come back to you.
 
 ## Love
 
