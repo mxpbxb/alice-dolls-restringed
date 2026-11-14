@@ -65,7 +65,7 @@ hooks) give the dolls their jobs.
 
 - **Alice's Dolls** by iwa_yukinoshita: the dolls, their designs, models and art, used with permission.
 - **Touhou Little Maid** by TartaricAcid and others: the doll bell, doll anchor and bauble art, under
-  [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/); its favour levelling
+  [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/); its love levelling
   inspired this port's.
 - Port by mxpbxb.
 
