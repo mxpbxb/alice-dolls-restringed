@@ -29,7 +29,7 @@ use horizon_client::mod_api::{
     ScreenRenderPostEvent, ScreenMouseScrolledPreEvent, RightClickBlockEvent,
     MobSubmitEvent, NativeServerPlayer, PlaceBlockEvent, StackData, Tag, Text, TooltipEvent,
     UseItemEvent, UseItemOnEvent, WorldSubmitEvent, Direction, EquipmentSlot, LivingDeathEvent, NativeEffect, ClientTickPostEvent,
-    NetFromClientEvent, NetFromServerEvent, ServerTickEvent, ServerTickPhase,
+    NetFromClientEvent, NetFromServerEvent, ServerTickEvent, ServerTickPhase, TrampleEvent,
 };
 
 // The kind every doll is underneath.
@@ -3117,6 +3117,12 @@ impl Hooks for Mod {
         }
     }
 
+    /// Farmland about to be trampled to dirt: a Yuuka near it will till it again. It is still trampled.
+    fn trample(&self, event: &mut TrampleEvent<'_>) -> Flow {
+        goals::trampled(event.pos, goals::dimension_code(event.dimension));
+        Flow::Continue
+    }
+
     fn entity_tick_listened(&self, _: &mut dyn Host, event: &mut EntityTickListenedEvent) {
         event.listened = true;
     }
@@ -4024,6 +4030,17 @@ mod tests {
         assert_eq!(goals::bake_bread(&mut items), 0);
         assert_eq!(total(&items, "minecraft:wheat"), 64);
         assert_eq!(total(&items, "minecraft:bread"), 0);
+    }
+
+    #[test]
+    fn trampled_farmland_is_remembered_near_where_it_was() {
+        goals::trampled([1000, 64, 1000], 0);
+        goals::trampled([1003, 64, 1000], 0);
+        goals::trampled([1001, 64, 1000], 1);
+        assert_eq!(goals::trampled_near([1000, 65, 1000], 0, 6), vec![[1000, 64, 1000], [1003, 64, 1000]]);
+        assert_eq!(goals::trampled_near([1000, 65, 1000], 1, 6), vec![[1001, 64, 1000]]);
+        assert!(goals::trampled_near([1000, 65, 1000], 0, 0).is_empty());
+        assert!(goals::trampled_near([0, 64, 0], 0, 6).is_empty());
     }
 
     #[test]

@@ -3065,6 +3065,42 @@ fn harvestable(w: &MobWorld, p: [i32; 3]) -> Option<&'static str> {
     }
 }
 
+/// How long a trampled patch of farmland stays on Yuuka's list to be tilled again.
+pub const TRAMPLE_MEMORY: std::time::Duration = std::time::Duration::from_secs(300);
+/// Most trampled patches remembered at once.
+const TRAMPLE_MAX: usize = 1024;
+
+/// Farmland trampled to dirt lately: where, in which level ([`dimension_code`]), and when.
+static TRAMPLED: LazyLock<Mutex<HashMap<[i32; 3], (u8, std::time::Instant)>>> = LazyLock::new(Default::default);
+
+/// The farmland at `pos` in level `dimension` is being trampled (by a player or a mob jumping on it):
+/// a Yuuka near it tills it again.
+pub fn trampled(pos: [i32; 3], dimension: u8) {
+    let Ok(mut t) = TRAMPLED.lock() else { return };
+    t.retain(|_, (_, at)| at.elapsed() < TRAMPLE_MEMORY);
+    if t.len() < TRAMPLE_MAX {
+        t.insert(pos, (dimension, std::time::Instant::now()));
+    }
+}
+
+/// The trampled patches in level `dimension` within `reach` steps of `from`, nearest first.
+pub fn trampled_near(from: [i32; 3], dimension: u8, reach: i32) -> Vec<[i32; 3]> {
+    let Ok(t) = TRAMPLED.lock() else { return Vec::new() };
+    let mut near: Vec<[i32; 3]> = t
+        .iter()
+        .filter(|(p, (d, at))| *d == dimension && at.elapsed() < TRAMPLE_MEMORY && steps(**p, from) <= reach)
+        .map(|(p, _)| *p)
+        .collect();
+    near.sort_by_key(|p| (steps(*p, from), *p));
+    near
+}
+
+fn forget_trampled(pos: [i32; 3]) {
+    if let Ok(mut t) = TRAMPLED.lock() {
+        t.remove(&pos);
+    }
+}
+
 fn farming(m: &Mob) -> bool {
     in_mode(m, PATROL) || in_mode(m, BLOOM)
 }
@@ -3130,7 +3166,45 @@ impl Farmer {
         }
     }
 
+    /// Farmland trampled lately near her: back to farmland, with what she last grew planted in it.
+    fn retill(&self, m: &mut Mob, cx: &mut Cx) {
+        let feet = [m.position.x.floor() as i32, m.position.y.floor() as i32, m.position.z.floor() as i32];
+        let w = cx.w;
+        for p in trampled_near(feet, world_dimension(w), FARM_RANGE + 1) {
+            let name = name_at(w, p);
+            let above = add(p, [0, 1, 0]);
+            // Not dirt any more (tilled by someone, built on), or something on it: off the list.
+            if !matches!(&*name, "minecraft:dirt") || !is_air(&name_at(w, above)) {
+                if &*name != "minecraft:farmland" {
+                    forget_trampled(p);
+                }
+                continue;
+            }
+            forget_trampled(p);
+            let at = p.map(|c| f64::from(c) + 0.5);
+            m.look_at(at);
+            cx.events.push(MobEvent::Sound("item.hoe.till", at, 1.0, 1.0));
+            cx.events.push(MobEvent::SetBlockName { mob: Some(m.id), pos: p, name: "minecraft:farmland", effect: false, flags: 3 });
+            let last = LAST_CROP.lock().ok().and_then(|l| l.get(&m.id).copied());
+            let seeded = holds(m.id, |item| plant_for(item).is_some());
+            if let Some(plant) = last.or_else(|| seeded.as_deref().and_then(plant_for))
+                && !stem_beside(w, above)
+            {
+                if let Some(seed) = CROPS.iter().find(|c| c.0 == plant).map(|c| c.1).or_else(|| STEMS.iter().find(|s| s.0 == plant).map(|s| s.1)) {
+                    take_one(m.id, seed);
+                }
+                cx.events.push(MobEvent::SetBlockName { mob: Some(m.id), pos: above, name: plant, effect: false, flags: 3 });
+            }
+            worked(m.id);
+            m.swing();
+            mark_swing(m.id);
+            // One patch a look round, as she tills her own.
+            break;
+        }
+    }
+
     fn till_and_plant(&self, m: &mut Mob, cx: &mut Cx) {
+        self.retill(m, cx);
         self.fill_farmland(m, cx);
         let w = cx.w;
         let [x, y, z] = eye_block(m);

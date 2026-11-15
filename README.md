@@ -30,7 +30,7 @@ Each recipe is the item in the top left, wool (Goliath: iron blocks), and a Doll
 | Aya | feather | Takes photos (real screenshots, from her eyes, with no HUD); punch her with an empty hand for one of you |
 | Wakasagi | tropical fish | Fishes; give her a fishing rod and she fishes with it and its enchantments. From love level 3 she fishes with at least Lure III and Luck of the Sea III of her own |
 | Goliath | diamond sword, iron blocks | Nearly three blocks tall: fights, knocks back, wears the armour in its first slots. Evolves into Netherite Goliath |
-| Yuuka | sunflower | Tills, plants and harvests, replanting. |
+| Yuuka | sunflower | Tills, plants and harvests, replanting; farmland trampled near her in the last five minutes she tills and plants again. |
 
 Horai dolls mine coal and iron as with Fortune III (the rest with Silk Touch).
 
