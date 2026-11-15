@@ -19,7 +19,7 @@ Each recipe is the item in the top left, wool (Goliath: iron blocks), and a Doll
 | Doll | Crafted with | What it does |
 |---|---|---|
 | Shanghai | golden sword | Fights hostile mobs, shears sheep, reports the mobs around it. Evolves into Goliath |
-| Horai | golden pickaxe | Finds ore (ancient debris too) and digs to it. Evolves into Diamond, then Netherite Horai, which waits four seconds before heading off to its quarry so you can give it another order |
+| Horai | golden pickaxe | Finds ore (ancient debris too) and digs to it. Evolves into Diamond, then Netherite Horai, which waits four seconds before heading off to its quarry so you can give it another order. Sneak and right-click any Horai with a netherite pickaxe for the giga quarry: a 20x20 pit round where she stands, dug layer by layer down to bedrock |
 | Ooedo | TNT | Walks up to hostile mobs and explodes; no explosion hurts it |
 | Germany | golden axe | Finds trees and chops them down |
 | London | eye of ender | Reports the spawners above and below it |
@@ -28,12 +28,18 @@ Each recipe is the item in the top left, wool (Goliath: iron blocks), and a Doll
 | Marisa | fire charge | Shoots homing stars at hostile mobs |
 | Reimu | paper | Shoots rings of homing amulets |
 | Aya | feather | Takes photos (real screenshots, from her eyes, with no HUD); punch her with an empty hand for one of you |
-| Wakasagi | tropical fish | Fishes; give her a fishing rod and she fishes with it and its enchantments |
+| Wakasagi | tropical fish | Fishes; give her a fishing rod and she fishes with it and its enchantments. From love level 3 she fishes with at least Lure III and Luck of the Sea III of her own |
 | Goliath | diamond sword, iron blocks | Nearly three blocks tall: fights, knocks back, wears the armour in its first slots. Evolves into Netherite Goliath |
-| Yuuka | sunflower | Tills, plants and harvests, replanting |
+| Yuuka | sunflower | Tills, plants and harvests, replanting. |
+
+Horai dolls mine coal and iron as with Fortune III (the rest with Silk Touch).
+
+A doll belongs to the player who placed it: it follows, rides and takes orders from them alone, and
+only they can pick it up, even with a Doll Core.
 
 Right-click a doll empty-handed to switch modes (Standby, Patrol, Follow, Rideon); with a Doll Core
-to turn its AI on or off; with a chest to open its inventory. Sneak and right-click it empty-handed
+to turn its AI on or off; with a chest to open its inventory. Ring the doll bell to pick which of your
+dolls come back to you (tick them, then ring from the screen); sneak and ring it to bring them all. Sneak and right-click it empty-handed
 to pick it up: like a shulker box, its item keeps its inventory, love and experience. A doll on
 your head stays out of your view in first person and keeps its reports to itself, and its baubles
 protect you too (the fire bauble from lava and fire). When you respawn, the dolls that were following
@@ -43,7 +49,8 @@ you or on your head come back to you.
 
 Dolls eat food from their inventory to heal, and at work (on patrol, following or on your head) a
 piece every five minutes. They pick up experience orbs, which you take back with a glass bottle.
-Eating earns love, but not healing what you did to them yourself: hit your own doll, and the food it
+Working earns love too: every 20 blocks mined, trees chopped, crops tended, fish caught or blows
+landed. Eating earns love, but not healing what you did to them yourself: hit your own doll, and the food it
 eats until it is whole again earns nothing. Point and power items (dropped by
 [Touhou Mobs](https://github.com/mxpbxb/touhou-mobs), from
 [Touhou Items](https://github.com/mxpbxb/touhou-items)) earn love too: right-click to give the stack,

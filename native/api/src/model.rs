@@ -161,7 +161,7 @@ pub fn draw_doll(
     let arm = (phase + std::f32::consts::PI).cos() * mob.walk_speed;
     let degrees = |radians: f32| radians.to_degrees();
     // `ModelBiped.setupAttackAnimation`: the right arm chops forward and back over a swing.
-    let swing = super::goals::swing_progress(mob.id);
+    let swing = super::swing_of(mob.id);
     let arm = if swing > 0.0 {
         let eased = 1.0 - (1.0 - swing).powi(4);
         let pi = std::f32::consts::PI;
@@ -466,7 +466,7 @@ pub fn draw_model(
     let pi = std::f32::consts::PI;
     let phase = mob.walk_position * 0.6662;
     let leg = (phase.cos() * model.leg_angle * mob.walk_speed).to_degrees();
-    let swing = super::goals::swing_progress(mob.id);
+    let swing = super::swing_of(mob.id);
     let mut arm = (phase + pi).cos() * mob.walk_speed;
     if swing > 0.0 {
         let eased = 1.0 - (1.0 - swing).powi(4);

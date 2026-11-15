@@ -265,6 +265,33 @@ pub fn level_of(id: u32) -> u32 {
     LEVELS.lock().ok().and_then(|l| l.get(&id).copied()).unwrap_or(0)
 }
 
+/// How many jobs done earn a doll its love for work: every 20 blocks dug or chopped, crops tended,
+/// fish caught, torches placed or blows landed.
+pub const JOBS_PER_LOVE: u32 = 20;
+
+/// Each doll's jobs done towards its next love for work.
+static JOBS: LazyLock<Mutex<HashMap<u32, u32>>> = LazyLock::new(Default::default);
+/// The dolls that have just done another twenty, for the api crate to give love to.
+static WORKED: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+
+/// Doll `id` did one job.
+pub fn worked(id: u32) {
+    let Ok(mut jobs) = JOBS.lock() else { return };
+    let n = jobs.entry(id).or_default();
+    *n += 1;
+    if *n >= JOBS_PER_LOVE {
+        *n = 0;
+        if let Ok(mut w) = WORKED.lock() {
+            w.push(id);
+        }
+    }
+}
+
+/// The dolls that did another twenty jobs since the last call, once for each twenty.
+pub fn take_worked() -> Vec<u32> {
+    WORKED.lock().map(|mut w| std::mem::take(&mut *w)).unwrap_or_default()
+}
+
 /// An attack at `level`: each level adds 3, then a tenth more of all of it.
 pub fn levelled_attack(base: f32, level: u32) -> f32 {
     (0..level).fold(base, |d, _| (d + 3.0) * 1.1)
@@ -448,6 +475,101 @@ fn in_mode(m: &Mob, mode: u8) -> bool {
     state(m.id).is_some_and(|s| s.enabled && s.mode == mode)
 }
 
+// ---- Owners ----
+
+/// A doll's owner as the api crate saw them on the server this tick. On a server the mob world shows
+/// each mob only the player nearest it, who need not be its owner: a doll follows, rides and quarries
+/// by its owner, wherever they stand, never by whoever is closest.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct OwnerSeen {
+    pub position: [f64; 3],
+    pub eye: [f64; 3],
+    pub velocity: [f64; 3],
+    pub yaw: f32,
+    /// Where they look, a unit vector.
+    pub look: [f64; 3],
+    pub sneaking: bool,
+    pub spectator: bool,
+    /// [`dimension_code`] of the level they are in.
+    pub dimension: u8,
+}
+
+static OWNERS: LazyLock<Mutex<HashMap<u128, OwnerSeen>>> = LazyLock::new(Default::default);
+
+/// Every player on the server, by UUID, as they are this tick: the api crate's word.
+pub fn set_owners(owners: Vec<(u128, OwnerSeen)>) {
+    if let Ok(mut o) = OWNERS.lock() {
+        o.clear();
+        o.extend(owners);
+    }
+}
+
+/// 0 the overworld, 1 the nether, 2 the end, 3 any other level (which a mob world can't tell apart).
+pub fn dimension_code(name: &str) -> u8 {
+    match name {
+        "minecraft:overworld" => 0,
+        "minecraft:the_nether" => 1,
+        "minecraft:the_end" => 2,
+        _ => 3,
+    }
+}
+
+fn world_dimension(w: &MobWorld) -> u8 {
+    if w.nether {
+        1
+    } else if w.end {
+        2
+    } else {
+        0
+    }
+}
+
+/// A player's UUID from its four ints, most significant first (`UUIDUtil.uuidFromIntArray`).
+pub fn uuid_of(ints: [i32; 4]) -> u128 {
+    ints.iter().fold(0u128, |acc, &i| (acc << 32) | u128::from(i as u32))
+}
+
+/// Where a player looks, from their yaw and pitch in degrees (`Entity.calculateViewVector`).
+pub fn look_of(yaw: f32, pitch: f32) -> [f64; 3] {
+    let (y, p) = (f64::from(yaw).to_radians(), f64::from(pitch).to_radians());
+    [-y.sin() * p.cos(), -p.sin(), y.cos() * p.cos()]
+}
+
+fn seen_of(p: &super::PlayerView, dimension: u8) -> OwnerSeen {
+    OwnerSeen {
+        position: [p.position.x, p.position.y, p.position.z],
+        eye: p.eye,
+        velocity: [p.velocity.x, p.velocity.y, p.velocity.z],
+        yaw: p.yaw,
+        look: p.look,
+        sneaking: p.sneaking,
+        spectator: p.spectator,
+        dimension,
+    }
+}
+
+/// Doll `m`'s owner as it sees them: the mob world's player when that is its owner (the freshest
+/// word), else where the server last saw them, if they are in this doll's level. A doll whose owner
+/// isn't known yet goes by the mob world's player, as single player always has.
+fn owner_seen(m: &Mob, w: &MobWorld) -> Option<OwnerSeen> {
+    let owner = state(m.id).map_or(0, |s| s.owner);
+    let here = world_dimension(w);
+    if let Some(p) = w.player.as_ref()
+        && (owner == 0 || uuid_of(p.uuid) == owner)
+    {
+        return Some(seen_of(p, here));
+    }
+    if owner == 0 {
+        return None;
+    }
+    OWNERS.lock().ok()?.get(&owner).copied().filter(|o| o.dimension == here)
+}
+
+/// Where doll `m`'s owner stands, unless they are a spectator or out of its level.
+fn owner_position(m: &Mob, cx: &Cx) -> Option<[f64; 3]> {
+    owner_seen(m, cx.w).filter(|o| !o.spectator).map(|o| o.position)
+}
+
 /// Runs before every mob's tick. Sheep take the shearing a doll gave them; a doll gets its goals.
 pub fn ensure(m: &mut Mob, w: &MobWorld) {
     spare_owner(m, w);
@@ -578,10 +700,10 @@ impl Goal for TargetGoliath {
 /// Rideon: on the owner's head every tick, before the doll moves, ahead by the owner's own motion
 /// so it does not trail behind.
 fn sit_on_head(m: &mut Mob, w: &MobWorld) {
-    let Some(p) = w.player.as_ref() else { return };
-    m.position.x = p.position.x + p.velocity.x;
-    m.position.y = p.eye[1] + 0.25 + p.velocity.y;
-    m.position.z = p.position.z + p.velocity.z;
+    let Some(p) = owner_seen(m, w).filter(|o| !o.spectator) else { return };
+    m.position.x = p.position[0] + p.velocity[0];
+    m.position.y = p.eye[1] + 0.25 + p.velocity[1];
+    m.position.z = p.position[2] + p.velocity[2];
     m.previous = m.position;
     m.velocity = horizon_core::geometry::Vec3::new(0.0, 0.0, 0.0);
     m.fall_distance = 0.0;
@@ -724,6 +846,7 @@ fn tick_doll(m: &mut Mob, w: &MobWorld) {
             if tier == 2 {
                 ai.goals.add(1, Quarry::default());
             }
+            ai.goals.add(1, GigaQuarry::default());
             ai.goals.add(1, FetchDrops::default());
             ai.goals.add(2, MineOre::default());
         }
@@ -731,9 +854,11 @@ fn tick_doll(m: &mut Mob, w: &MobWorld) {
             ai.goals.add(0, Detonate::default());
             ai.goals.add(4, Explode::default());
         }
-        // PlantTree needs a sapling from the doll's inventory, which is not ported yet.
+        // PlantTree needs a sapling from the doll's inventory, which is not ported yet. Ahead of
+        // picking up what is dropped (5): at 10, every log it cut drew it off the tree to fetch the
+        // drop, and the tree was forgotten; now it fells the whole tree, then gathers.
         Kind::Germany => {
-            ai.goals.add(10, CutTree::default());
+            ai.goals.add(2, CutTree::default());
         }
         Kind::London => {
             ai.goals.add(11, ReportSpawners::default());
@@ -874,10 +999,6 @@ fn patrolling(m: &Mob, _: &MobWorld) -> bool {
     in_mode(m, PATROL)
 }
 
-fn player_position(cx: &Cx) -> Option<[f64; 3]> {
-    let p = cx.w.player.as_ref()?;
-    (!p.spectator).then_some([p.position.x, p.position.y, p.position.z])
-}
 
 fn distance_sqr(m: &Mob, at: [f64; 3]) -> f64 {
     let (dx, dy, dz) = (m.position.x - at[0], m.position.y - at[1], m.position.z - at[2]);
@@ -946,7 +1067,7 @@ impl Goal for DollRide {
         goals::JUMP
     }
     fn can_use(&mut self, m: &mut Mob, cx: &mut Cx) -> bool {
-        in_mode(m, RIDE) && cx.w.player.is_some()
+        in_mode(m, RIDE) && owner_position(m, cx).is_some()
     }
     fn start(&mut self, m: &mut Mob, _: &mut Cx) {
         m.nav_stop();
@@ -1019,8 +1140,8 @@ struct DollAttack {
     lost: i32,
 }
 
-fn near_owner(cx: &Cx, s: &Seen) -> bool {
-    player_position(cx).is_some_and(|p| {
+fn near_owner(m: &Mob, cx: &Cx, s: &Seen) -> bool {
+    owner_position(m, cx).is_some_and(|p| {
         let (dx, dy, dz) = (s.position.x - p[0], s.position.y - p[1], s.position.z - p[2]);
         dx * dx + dy * dy + dz * dz <= OWNER_GUARD * OWNER_GUARD
     })
@@ -1065,7 +1186,7 @@ impl Goal for DollAttack {
             nearest(m, cx, enemy)
         } else if in_mode(m, FOLLOW) || in_mode(m, RIDE) {
             nearest(m, cx, |s| {
-                matches!(s.target, Some(Who::Player)) || (enemy(s) && near_owner(cx, s))
+                matches!(s.target, Some(Who::Player)) || (enemy(s) && near_owner(m, cx, s))
             })
         } else {
             None
@@ -1078,7 +1199,7 @@ impl Goal for DollAttack {
             true
         } else if in_mode(m, FOLLOW) || in_mode(m, RIDE) {
             // A following doll does not chase off: it lets go of anything that leaves its owner.
-            matches!(s.target, Some(Who::Player)) || near_owner(cx, s)
+            matches!(s.target, Some(Who::Player)) || near_owner(m, cx, s)
         } else {
             false
         };
@@ -1121,6 +1242,7 @@ impl Goal for DollAttack {
                 amount: attack(m.id, ATTACK_STRENGTH),
                 source: Damage::player(here(m)),
             });
+            worked(m.id);
         }
     }
     fn box_clone(&self) -> Box<dyn Goal> {
@@ -1266,6 +1388,16 @@ fn mark_swing(id: u32) {
     if let Ok(mut swings) = SWINGS.lock() {
         swings.insert(id, std::time::Instant::now());
     }
+}
+
+/// Every doll swinging now, and how far through: the api crate sends these to the other players.
+pub fn swings() -> Vec<(u32, f32)> {
+    let Ok(swings) = SWINGS.lock() else { return Vec::new() };
+    swings
+        .iter()
+        .map(|(&id, start)| (id, start.elapsed().as_secs_f32() / SWING_SECONDS))
+        .filter(|&(_, t)| t < 1.0)
+        .collect()
 }
 
 /// How far through its swing a doll is, 0 to 1, or 0 when it is not swinging.
@@ -1450,11 +1582,11 @@ impl Goal for DollFollow {
     fn can_use(&mut self, m: &mut Mob, cx: &mut Cx) -> bool {
         in_mode(m, FOLLOW)
             && bound_to(m.id).is_none()
-            && player_position(cx).is_some_and(|at| distance_sqr(m, at) >= FOLLOW_START * FOLLOW_START)
+            && owner_position(m, cx).is_some_and(|at| distance_sqr(m, at) >= FOLLOW_START * FOLLOW_START)
     }
     fn can_continue(&mut self, m: &mut Mob, cx: &mut Cx) -> bool {
         in_mode(m, FOLLOW)
-            && player_position(cx).is_some_and(|at| distance_sqr(m, at) > FOLLOW_STOP * FOLLOW_STOP)
+            && owner_position(m, cx).is_some_and(|at| distance_sqr(m, at) > FOLLOW_STOP * FOLLOW_STOP)
     }
     fn start(&mut self, _: &mut Mob, _: &mut Cx) {
         self.recalculate_in = 0;
@@ -1466,8 +1598,8 @@ impl Goal for DollFollow {
         true
     }
     fn tick(&mut self, m: &mut Mob, cx: &mut Cx) {
-        let Some(at) = player_position(cx) else { return };
-        let eye = cx.w.player.as_ref().map_or(at[1], |p| p.eye[1]);
+        let Some(at) = owner_position(m, cx) else { return };
+        let eye = owner_seen(m, cx.w).map_or(at[1], |p| p.eye[1]);
         m.look_at([at[0], eye, at[2]]);
         self.recalculate_in -= 1;
         if self.recalculate_in > 0 {
@@ -1864,6 +1996,9 @@ impl Goal for Explode {
 /// original's 2.5).
 const CUT_RANGE: i32 = 5;
 const CUT_SPEED: f32 = 5.0;
+/// How far below and above its eyes it looks for a trunk.
+const TRUNK_BELOW: i32 = 2;
+const TRUNK_ABOVE: i32 = 4;
 
 /// `logBlockRegex` (`log|mushroom`): logs, nether stems, and giant mushrooms.
 fn is_log(name: &str) -> bool {
@@ -1889,8 +2024,9 @@ struct CutTree {
 }
 
 impl CutTree {
-    /// The nearest trunk with at least four leaves beside it: its top block, the leaves beside it
-    /// and how tall it is.
+    /// The nearest tree: a trunk within `CUT_RANGE` across and from `TRUNK_BELOW` below its eyes to
+    /// `TRUNK_ABOVE` above them (a tree on a slope, or one it stands below), crowned with leaves (at
+    /// least three beside it, or leaves on top). Its top block, the leaves round it and how tall it is.
     fn find(&self, m: &Mob, w: &MobWorld) -> Option<([i32; 3], Arc<str>, u32, u32)> {
         let [x, y, z] = eye_block(m);
         let mut best: Option<([i32; 3], Arc<str>, u32, u32)> = None;
@@ -1901,26 +2037,28 @@ impl CutTree {
                 if steps > CUT_RANGE || steps >= best_steps {
                     continue;
                 }
-                let log = name_at(w, [x + dx, y, z + dz]);
-                if !is_log(&log) {
+                let (cx, cz) = (x + dx, z + dz);
+                let Some(found) = (y - TRUNK_BELOW..=y + TRUNK_ABOVE).find(|&ty| is_log(&name_at(w, [cx, ty, cz]))) else {
                     continue;
-                }
-                let mut ty = y;
-                while ty > WORLD_BOTTOM && name_at(w, [x + dx, ty - 1, z + dz]) == log {
+                };
+                let log = name_at(w, [cx, found, cz]);
+                let mut ty = found;
+                while ty > WORLD_BOTTOM && name_at(w, [cx, ty - 1, cz]) == log {
                     ty -= 1;
                 }
                 let (mut height, mut leaves) = (0, 0);
-                while name_at(w, [x + dx, ty, z + dz]) == log {
+                while name_at(w, [cx, ty, cz]) == log && height < 64 {
                     for (ox, oz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-                        if is_leafy(&name_at(w, [x + dx + ox, ty, z + dz + oz])) {
+                        if is_leafy(&name_at(w, [cx + ox, ty, cz + oz])) {
                             leaves += 1;
                         }
                     }
                     height += 1;
                     ty += 1;
                 }
-                if leaves >= 4 {
-                    best = Some(([x + dx, ty - 1, z + dz], log, leaves, height));
+                let crowned = is_leafy(&name_at(w, [cx, ty, cz]));
+                if leaves >= 3 || (crowned && leaves >= 1) {
+                    best = Some(([cx, ty - 1, cz], log, leaves, height));
                     best_steps = steps;
                 }
             }
@@ -2010,6 +2148,7 @@ impl Goal for CutTree {
         m.look_at(at);
         if self.counter >= self.strength {
             cx.events.push(MobEvent::BreakBlock { pos: self.cut, drop: true });
+            worked(m.id);
             self.counter = 0;
             return;
         }
@@ -2237,6 +2376,7 @@ impl Goal for Torcher {
                 effect: false,
                 flags: 3,
             });
+            worked(m.id);
             m.swing();
             mark_swing(m.id);
         }
@@ -2278,6 +2418,12 @@ fn set_beam(id: u32, beam: Option<([f64; 3], [f64; 3])>) {
 }
 
 /// The Marisa dolls' beams firing now, for the api crate to draw: from, to.
+/// Marisa's beams now, by the doll holding each.
+pub fn beams_by_doll() -> Vec<(u32, [f64; 3], [f64; 3])> {
+    let Ok(b) = BEAMS.lock() else { return Vec::new() };
+    b.iter().filter(|(_, (_, _, t))| t.elapsed().as_millis() < 200).map(|(&id, (a, b, _))| (id, *a, *b)).collect()
+}
+
 pub fn doll_beams() -> Vec<([f64; 3], [f64; 3])> {
     let Ok(b) = BEAMS.lock() else { return Vec::new() };
     b.values().filter(|(_, _, t)| t.elapsed().as_millis() < 200).map(|(a, b, _)| (*a, *b)).collect()
@@ -2299,6 +2445,13 @@ const BULLET_LIFE: i32 = 80;
 /// Every doll's shots in flight, by doll: which kind (0 a star, 1 an amulet), and where each is now
 /// and was a tick ago. The api crate draws them each frame; the particles alone didn't show.
 static FLYING: LazyLock<Mutex<HashMap<u32, (u8, Vec<([f64; 3], [f64; 3])>)>>> = LazyLock::new(Default::default);
+
+/// The dolls' shots in flight, by the doll that fired them: the api crate sends each player those in
+/// their level.
+pub fn shots_by_doll() -> Vec<(u32, u8, [f64; 3], [f64; 3])> {
+    let Ok(f) = FLYING.lock() else { return Vec::new() };
+    f.iter().flat_map(|(&id, (k, v))| v.iter().map(move |(at, was)| (id, *k, *at, *was))).collect()
+}
 
 /// The dolls' shots in flight: kind (0 a star, 1 an amulet), where it is, where it was.
 pub fn flying_shots() -> Vec<(u8, [f64; 3], [f64; 3])> {
@@ -2356,6 +2509,7 @@ impl Danmaku {
         if !is_doll(target) {
             // DamageSource.causePlayerDamage(owner): the kill is the owner's.
             cx.events.push(MobEvent::AttackMob { target, amount: attack(m.id, BEAM_DAMAGE), source: Damage::player(here(m)) });
+            worked(m.id);
         }
         cx.events.push(MobEvent::ParticleAt { kind: "flash", at: aim, velocity: [0.0; 3] });
         cx.events.push(MobEvent::Sound("entity.blaze.shoot", muzzle, 0.25, 2.0));
@@ -2367,7 +2521,7 @@ impl Danmaku {
             return false;
         }
         // Following or riding, it guards its owner and does not go after anything far from them.
-        !(in_mode(m, FOLLOW) || in_mode(m, RIDE)) || matches!(s.target, Some(Who::Player)) || near_owner(cx, s)
+        !(in_mode(m, FOLLOW) || in_mode(m, RIDE)) || matches!(s.target, Some(Who::Player)) || near_owner(m, cx, s)
     }
     fn fire(&mut self, m: &mut Mob, cx: &mut Cx, target: u32, at: [f64; 3]) {
         let muzzle = [m.position.x, m.position.y + m.kind.eye_height, m.position.z];
@@ -2397,6 +2551,7 @@ impl Danmaku {
         let damage = attack(m.id, damage);
         let mut drawn = Vec::new();
         let from = here(m);
+        let id = m.id;
         let w = cx.w;
         let events = &mut cx.events;
         self.bullets.retain_mut(|b| {
@@ -2417,6 +2572,7 @@ impl Danmaku {
                 if !is_doll(b.target) {
                     // DamageSource.causePlayerDamage(owner): the kill is the owner's.
                     events.push(MobEvent::AttackMob { target: b.target, amount: damage, source: Damage::player(from) });
+                    worked(id);
                 }
                 events.push(MobEvent::ParticleAt { kind: sparkle, at: aim, velocity: [0.0; 3] });
                 return false;
@@ -2681,7 +2837,7 @@ impl Goal for GoliathAttack {
             nearest(m, cx, enemy)
         } else if in_mode(m, FOLLOW) || in_mode(m, RIDE) {
             nearest(m, cx, |s| {
-                !is_doll(s.id) && (matches!(s.target, Some(Who::Player)) || (enemy(s) && near_owner(cx, s)))
+                !is_doll(s.id) && (matches!(s.target, Some(Who::Player)) || (enemy(s) && near_owner(m, cx, s)))
             })
         } else {
             None
@@ -2733,6 +2889,7 @@ impl Goal for GoliathAttack {
                 amount: attack(m.id, if self.strength > 0.0 { self.strength } else { GOLIATH_STRENGTH }),
                 source: Damage::player(here(m)),
             });
+            worked(m.id);
             let (dx, dz) = (at[0] - m.position.x, at[2] - m.position.z);
             let dr = (dx * dx + dz * dz + 0.01).sqrt();
             cx.events.push(MobEvent::Push { target: Who::Mob(id), velocity: [dx / dr, 0.1, dz / dr] });
@@ -2748,6 +2905,108 @@ impl Goal for GoliathAttack {
 }
 
 // ---- Yuuka: EntityDollAIFarmer ----
+
+pub const BLOOM_GAP: i32 = 4;
+pub const BLOOM_PER_ROUND: usize = 3;
+/// Wheat to a loaf, as at a crafting table.
+pub const BREAD_WHEAT: u32 = 3;
+const STACK: u32 = 64;
+
+/// A crop's age after bonemeal: two to five more, as in the game, at most `max`.
+pub fn bloom_age(age: u32, max: u32, roll: i32) -> u32 {
+    (age + 2 + roll.clamp(0, 3) as u32).min(max)
+}
+
+/// Bakes the wheat in `items` into bread, three to a loaf, where there is room for it: the loaves baked.
+pub fn bake_bread(items: &mut [Option<ItemStack>]) -> u32 {
+    let wheat: u32 = items.iter().flatten().filter(|s| &*s.item == "minecraft:wheat").map(|s| s.count).sum();
+    let mut loaves = wheat / BREAD_WHEAT;
+    if loaves == 0 {
+        return 0;
+    }
+    // Take the wheat out, then put the bread in; whatever bread finds no room goes back as wheat.
+    let mut take = loaves * BREAD_WHEAT;
+    for slot in items.iter_mut() {
+        if take == 0 {
+            break;
+        }
+        if let Some(s) = slot
+            && &*s.item == "minecraft:wheat"
+        {
+            let n = s.count.min(take);
+            s.count -= n;
+            take -= n;
+            if s.count == 0 {
+                *slot = None;
+            }
+        }
+    }
+    let mut left = loaves;
+    for slot in items.iter_mut() {
+        if left == 0 {
+            break;
+        }
+        if let Some(s) = slot
+            && &*s.item == "minecraft:bread"
+            && s.count < STACK
+        {
+            let n = (STACK - s.count).min(left);
+            s.count += n;
+            left -= n;
+        }
+    }
+    for slot in items.iter_mut() {
+        if left == 0 {
+            break;
+        }
+        if slot.is_none() {
+            let n = left.min(STACK);
+            *slot = Some(ItemStack { item: Arc::from("minecraft:bread"), count: n, damage: 0, extra: None });
+            left -= n;
+        }
+    }
+    if left > 0 {
+        loaves -= left;
+        let mut back = left * BREAD_WHEAT;
+        for slot in items.iter_mut() {
+            if back == 0 {
+                break;
+            }
+            match slot {
+                Some(s) if &*s.item == "minecraft:wheat" && s.count < STACK => {
+                    let n = (STACK - s.count).min(back);
+                    s.count += n;
+                    back -= n;
+                }
+                None => {
+                    let n = back.min(STACK);
+                    *slot = Some(ItemStack { item: Arc::from("minecraft:wheat"), count: n, damage: 0, extra: None });
+                    back -= n;
+                }
+                _ => {}
+            }
+        }
+    }
+    loaves
+}
+
+/// A crop that bonemeal grows: its age now and the age it is grown at. Melon and pumpkin stems grow to
+/// 7 (their fruit she leaves to the stem); cocoa to 2.
+fn bloomable(w: &MobWorld, p: [i32; 3]) -> Option<(u32, u32)> {
+    let name = name_at(w, p);
+    let max = if let Some(c) = CROPS.iter().find(|c| *c.0 == *name) {
+        c.2.parse().ok()?
+    } else if is_stem(&name) && !name.starts_with("minecraft:attached") {
+        7
+    } else if &*name == "minecraft:cocoa" {
+        2
+    } else {
+        return None;
+    };
+    let [x, y, z] = p;
+    let age: u32 = w.registry.state(w.world.block(x, y, z))?.properties.get("age")?.parse().ok()?;
+    (age < max).then_some((age, max))
+}
 
 /// `farmRange`: how far, in steps along the axes, Yuuka farms.
 const FARM_RANGE: i32 = 5;
@@ -2806,6 +3065,10 @@ fn harvestable(w: &MobWorld, p: [i32; 3]) -> Option<&'static str> {
     }
 }
 
+fn farming(m: &Mob) -> bool {
+    in_mode(m, PATROL) || in_mode(m, BLOOM)
+}
+
 /// What each Yuuka last planted or harvested: what she fills empty farmland with.
 static LAST_CROP: LazyLock<Mutex<HashMap<u32, &'static str>>> = LazyLock::new(Default::default);
 
@@ -2821,9 +3084,50 @@ struct Farmer {
 }
 
 impl Farmer {
-    /// Ticks between her looks round for work: a second, shorter with favour.
     fn last_scan_gap(&self, m: &Mob) -> i32 {
+        if in_mode(m, BLOOM) {
+            return BLOOM_GAP;
+        }
         quicker(20, boost(m.id)).max(4)
+    }
+
+    fn bloom(&self, m: &mut Mob, cx: &mut Cx) {
+        if !in_mode(m, BLOOM) {
+            return;
+        }
+        if edit_inventory(m.id, |items| bake_bread(items)).unwrap_or(0) > 0 {
+            worked(m.id);
+        }
+        let eye = eye_block(m);
+        let r = FARM_RANGE;
+        let mut growing: Vec<([i32; 3], u32, u32, i32)> = Vec::new();
+        for dy in -r..=r {
+            for dx in -r..=r {
+                for dz in -r..=r {
+                    let d = [dx, dy, dz];
+                    let n = steps(d, [0; 3]);
+                    if n > r {
+                        continue;
+                    }
+                    if let Some((age, max)) = bloomable(cx.w, add(eye, d)) {
+                        growing.push((add(eye, d), age, max, n));
+                    }
+                }
+            }
+        }
+        growing.sort_by_key(|g| g.3);
+        for (p, age, max, _) in growing.into_iter().take(BLOOM_PER_ROUND) {
+            let [x, y, z] = p;
+            let Some(mut state) = cx.w.registry.state(cx.w.world.block(x, y, z)).cloned() else { continue };
+            let roll = m.random.next_int_bound(4).unwrap_or(0);
+            state.properties.insert("age".into(), bloom_age(age, max, roll).to_string().into());
+            let Ok(state) = cx.w.registry.resolve(&state) else { continue };
+            let at = p.map(|c| f64::from(c) + 0.5);
+            cx.events.push(MobEvent::SetBlock { pos: p, state });
+            cx.events.push(MobEvent::ParticleAt { kind: "happy_villager", at, velocity: [0.0; 3] });
+            cx.events.push(MobEvent::Sound("item.bone_meal.use", at, 0.6, 1.0));
+            worked(m.id);
+        }
     }
 
     fn till_and_plant(&self, m: &mut Mob, cx: &mut Cx) {
@@ -2850,6 +3154,7 @@ impl Farmer {
                     effect: false,
                     flags: 3,
                 });
+                worked(m.id);
                 m.swing();
                 mark_swing(m.id);
                 break;
@@ -2882,6 +3187,7 @@ impl Farmer {
                     effect: false,
                     flags: 3,
                 });
+                worked(m.id);
                 m.swing();
                 mark_swing(m.id);
             }
@@ -2895,10 +3201,11 @@ impl Goal for Farmer {
         goals::MOVE | goals::LOOK
     }
     fn can_use(&mut self, m: &mut Mob, cx: &mut Cx) -> bool {
-        if !in_mode(m, PATROL) || cx.w.game_time - self.last_scan < i64::from(self.last_scan_gap(m)) {
+        if !farming(m) || cx.w.game_time - self.last_scan < i64::from(self.last_scan_gap(m)) {
             return false;
         }
         self.last_scan = cx.w.game_time;
+        self.bloom(m, cx);
         self.till_and_plant(m, cx);
         let eye = eye_block(m);
         let r = FARM_RANGE;
@@ -2924,7 +3231,7 @@ impl Goal for Farmer {
     }
     fn can_continue(&mut self, m: &mut Mob, cx: &mut Cx) -> bool {
         let at = [m.position.x.floor() as i32, m.position.y.floor() as i32, m.position.z.floor() as i32];
-        in_mode(m, PATROL)
+        farming(m)
             && steps(at, self.target) <= FARM_RANGE + 1
             && self.block.is_some_and(|b| *name_at(cx.w, self.target) == *b)
     }
@@ -2945,7 +3252,7 @@ impl Goal for Farmer {
         if self.counter == 0 {
             m.nav_move_to(cx.w, at, 1.0);
         }
-        if self.counter == quicker(20, boost(m.id)).max(4) {
+        if self.counter == self.last_scan_gap(m) {
             // A cocoa pod is put back as a new one, on the same side of its log.
             let new_pod = (block == "minecraft:cocoa")
                 .then(|| {
@@ -2956,6 +3263,7 @@ impl Goal for Farmer {
                 })
                 .flatten();
             cx.events.push(MobEvent::BreakBlock { pos: self.target, drop: true });
+            worked(m.id);
             if let Some(state) = new_pod {
                 take_one(m.id, "minecraft:cocoa_beans");
                 cx.events.push(MobEvent::SetBlock { pos: self.target, state });
@@ -3011,6 +3319,16 @@ fn dig_ticks(tier: u8, hardness: f32) -> i32 {
     }
 }
 
+pub fn ore_rank(name: &str) -> u8 {
+    let s = short(name);
+    let s = s.strip_prefix("deepslate_").or_else(|| s.strip_prefix("nether_")).unwrap_or(s);
+    match s {
+        "ancient_debris" | "diamond_ore" | "gold_ore" | "emerald_ore" => 0,
+        "coal_ore" => 2,
+        _ => 1,
+    }
+}
+
 fn is_treasure(name: &str) -> bool {
     matches!(short(name), "diamond_ore" | "deepslate_diamond_ore" | "ancient_debris")
 }
@@ -3030,16 +3348,40 @@ fn centre(p: [i32; 3]) -> [f64; 3] {
     p.map(|c| f64::from(c) + 0.5)
 }
 
-/// Breaks `p` as a pickaxe with Silk Touch: an ore (or ancient debris) drops itself at `to`; anything
-/// else its usual drops where it was, or nothing when it is filler and `filler_drops` is false.
-fn break_out(m: &Mob, cx: &mut Cx, p: [i32; 3], to: [f64; 3], filler_drops: bool) {
+/// What coal and iron ore drop to a pickaxe with Fortune III, which the dolls dig them with: coal
+/// and raw iron. Every other ore keeps Silk Touch.
+pub fn fortune_drop(name: &str) -> Option<&'static str> {
+    match short(name) {
+        "coal_ore" | "deepslate_coal_ore" => Some("minecraft:coal"),
+        "iron_ore" | "deepslate_iron_ore" => Some("minecraft:raw_iron"),
+        _ => None,
+    }
+}
+
+/// Fortune's `ore_drops` bonus (`ApplyBonusCount.OreDrops`): one drop times one more than
+/// `max(0, nextInt(level + 2) - 1)`; `roll` is that `nextInt`. At level III: 1, 1, 2, 3 or 4.
+pub fn fortune_count(roll: i32) -> u32 {
+    (roll - 1).max(0) as u32 + 1
+}
+
+const FORTUNE: i32 = 3;
+
+/// Breaks `p` as a pickaxe with Silk Touch: an ore (or ancient debris) drops itself at `to`, but
+/// coal and iron ore drop coal and raw iron with Fortune III; anything else its usual drops where it
+/// was, or nothing when it is filler and `filler_drops` is false. Every block counts to its love.
+fn break_out(m: &mut Mob, cx: &mut Cx, p: [i32; 3], to: [f64; 3], filler_drops: bool) {
     let name = name_at(cx.w, p);
-    if is_ore(&name) || is_treasure(&name) {
+    if let Some(drop) = fortune_drop(&name) {
+        let roll = m.random.next_int_bound(FORTUNE + 2).unwrap_or(0);
+        cx.events.push(MobEvent::BreakBlock { pos: p, drop: false });
+        cx.events.push(MobEvent::DropItem { mob: m.id, item: Arc::from(drop), count: fortune_count(roll), at: to });
+    } else if is_ore(&name) || is_treasure(&name) {
         cx.events.push(MobEvent::BreakBlock { pos: p, drop: false });
         cx.events.push(MobEvent::DropItem { mob: m.id, item: name, count: 1, at: to });
     } else {
         cx.events.push(MobEvent::BreakBlock { pos: p, drop: filler_drops || !is_filler(&name) });
     }
+    worked(m.id);
 }
 
 fn is_liquid(name: &str) -> bool {
@@ -3164,15 +3506,23 @@ fn move_to_cell(m: &mut Mob, p: [i32; 3]) {
 
 // ---- Strip-mining from the head ----
 
-/// The last block the player broke, and how many they have broken: the api crate's loot hook says.
-static PLAYER_DUG: Mutex<(u64, [i32; 3])> = Mutex::new((0, [0; 3]));
+/// The last block each player broke, and how many they have broken: the api crate's loot hook says.
+/// By player, so a Horai on her owner's head digs on after her owner, not after someone else nearby.
+static PLAYER_DUG: LazyLock<Mutex<HashMap<u128, (u64, [i32; 3])>>> = LazyLock::new(Default::default);
 
-/// The player broke the block at `pos`.
-pub fn player_dug(pos: [i32; 3]) {
+/// The player `player` broke the block at `pos`.
+pub fn player_dug(player: u128, pos: [i32; 3]) {
     if let Ok(mut d) = PLAYER_DUG.lock() {
-        d.0 += 1;
-        d.1 = pos;
+        let e = d.entry(player).or_default();
+        e.0 += 1;
+        e.1 = pos;
     }
+}
+
+/// How many blocks doll `id`'s owner has broken, and the last.
+fn owner_dug(id: u32) -> (u64, [i32; 3]) {
+    let owner = state(id).map_or(0, |s| s.owner);
+    PLAYER_DUG.lock().ok().and_then(|d| d.get(&owner).copied()).unwrap_or_default()
 }
 
 /// On her owner's head, each block they break straight ahead of them, the Diamond or Netherite Horai
@@ -3186,8 +3536,8 @@ struct StripMine {
 
 impl StripMine {
     /// Takes in a block the player broke since the last look, and queues the tunnel past it.
-    fn take_dug(&mut self, cx: &Cx) {
-        let Ok((n, dug)) = PLAYER_DUG.lock().map(|d| *d) else { return };
+    fn take_dug(&mut self, m: &Mob, cx: &Cx) {
+        let (n, dug) = owner_dug(m.id);
         if n == self.seen {
             return;
         }
@@ -3196,8 +3546,8 @@ impl StripMine {
         if first {
             return;
         }
-        let Some(p) = cx.w.player.as_ref() else { return };
-        let feet = [p.position.x.floor() as i32, p.position.y.floor() as i32, p.position.z.floor() as i32];
+        let Some(p) = owner_seen(m, cx.w) else { return };
+        let feet = p.position.map(|c| c.floor() as i32);
         let dir = if p.look[0].abs() > p.look[2].abs() {
             [p.look[0].signum() as i32, 0, 0]
         } else {
@@ -3231,10 +3581,10 @@ impl Goal for StripMine {
     }
     fn can_use(&mut self, m: &mut Mob, cx: &mut Cx) -> bool {
         if horai_tier(m) == 0 || !in_mode(m, RIDE) {
-            self.seen = PLAYER_DUG.lock().map_or(self.seen, |d| d.0.max(1));
+            self.seen = owner_dug(m.id).0.max(1);
             return false;
         }
-        self.take_dug(cx);
+        self.take_dug(m, cx);
         !self.queue.is_empty()
     }
     fn can_continue(&mut self, m: &mut Mob, _: &mut Cx) -> bool {
@@ -3248,7 +3598,7 @@ impl Goal for StripMine {
         true
     }
     fn tick(&mut self, m: &mut Mob, cx: &mut Cx) {
-        self.take_dug(cx);
+        self.take_dug(m, cx);
         if self.dig.at.is_some() {
             if let Some(p) = self.dig.tick(m, cx) {
                 break_out(m, cx, p, centre(p), true);
@@ -3356,8 +3706,8 @@ impl Quarry {
 
     /// A new shaft behind her owner, or as near behind them as is clear of lava; she teleports there.
     fn new_site(&mut self, m: &mut Mob, cx: &mut Cx) {
-        let Some(p) = cx.w.player.as_ref() else { return };
-        let (px, py, pz) = (p.position.x, p.position.y, p.position.z);
+        let Some(p) = owner_seen(m, cx.w) else { return };
+        let [px, py, pz] = p.position;
         let n = (p.look[0] * p.look[0] + p.look[2] * p.look[2]).sqrt();
         let (bx, bz) = if n > 1e-3 { (-p.look[0] / n, -p.look[2] / n) } else { (0.0, 1.0) };
         for dist in [3.0, 6.0, 10.0, 14.0] {
@@ -3456,7 +3806,7 @@ impl Goal for Quarry {
         goals::MOVE | goals::LOOK
     }
     fn can_use(&mut self, m: &mut Mob, cx: &mut Cx) -> bool {
-        horai_tier(m) == 2 && in_mode(m, PATROL) && cx.w.player.is_some()
+        horai_tier(m) == 2 && in_mode(m, PATROL) && owner_position(m, cx).is_some()
     }
     fn can_continue(&mut self, m: &mut Mob, cx: &mut Cx) -> bool {
         self.can_use(m, cx)
@@ -3585,6 +3935,154 @@ impl Quarry {
     }
 }
 
+// ---- The giga quarry ----
+
+/// Sneak and right-click a Horai with a netherite pickaxe: the giga quarry. She digs out a 20x20
+/// pit, layer by layer, from where she stood down to bedrock, at her own pace (and the netherite
+/// one twice over, as in her quarry). She never digs a block beside lava or water, so the pit
+/// doesn't flood: those stay as walls. Again, or any other order, ends it.
+pub const GIGA: u8 = 6;
+pub const BLOOM: u8 = 7;
+/// Its width and length.
+pub const GIGA_SIZE: i32 = 20;
+
+/// Each giga quarry's corner (its least x and z, and the top layer's y), as the api crate saves it.
+static GIGA_SITES: LazyLock<Mutex<HashMap<u32, [i32; 3]>>> = LazyLock::new(Default::default);
+
+pub fn set_giga_site(id: u32, site: Option<[i32; 3]>) {
+    if let Ok(mut g) = GIGA_SITES.lock() {
+        match site {
+            Some(s) => g.insert(id, s),
+            None => g.remove(&id),
+        };
+    }
+}
+
+fn giga_site(id: u32) -> Option<[i32; 3]> {
+    GIGA_SITES.lock().ok()?.get(&id).copied()
+}
+
+/// The corner of a giga quarry centred on `feet`, its top layer the block under them.
+pub fn giga_corner(feet: [i32; 3]) -> [i32; 3] {
+    [feet[0] - GIGA_SIZE / 2, feet[1] - 1, feet[2] - GIGA_SIZE / 2]
+}
+
+/// The cells of layer `y` of the giga quarry at `site`, in the order they are taken from the end:
+/// row by row, each row back and forth, so she works across the pit without long jumps.
+pub fn giga_cells(site: [i32; 3], y: i32) -> Vec<[i32; 3]> {
+    let mut v = Vec::with_capacity((GIGA_SIZE * GIGA_SIZE) as usize);
+    for row in 0..GIGA_SIZE {
+        for k in 0..GIGA_SIZE {
+            let col = if row % 2 == 0 { k } else { GIGA_SIZE - 1 - k };
+            v.push([site[0] + col, y, site[2] + row]);
+        }
+    }
+    v.reverse();
+    v
+}
+
+/// Lava or water beside `p` (or above it): digging it would let the liquid in.
+fn by_liquid(w: &MobWorld, p: [i32; 3]) -> bool {
+    SIDES.iter().any(|&d| is_liquid(&name_at(w, add(p, d))))
+}
+
+#[derive(Clone, Debug, Default)]
+struct GigaQuarry {
+    layer: Option<i32>,
+    cells: Vec<[i32; 3]>,
+    /// Blocks of this layer dug or left, to tell a layer of bedrock.
+    hard: usize,
+    dig: Dig,
+    fetch: Fetch,
+    done: bool,
+}
+
+impl Goal for GigaQuarry {
+    fn flags(&self) -> u8 {
+        goals::MOVE | goals::LOOK
+    }
+    fn can_use(&mut self, m: &mut Mob, _: &mut Cx) -> bool {
+        in_mode(m, GIGA) && giga_site(m.id).is_some()
+    }
+    fn can_continue(&mut self, m: &mut Mob, cx: &mut Cx) -> bool {
+        self.can_use(m, cx)
+    }
+    fn start(&mut self, m: &mut Mob, _: &mut Cx) {
+        self.layer = None;
+        self.cells.clear();
+        self.done = false;
+        say(m.id, 1, "Giga quarry: digging a 20x20 pit to bedrock");
+    }
+    fn stop(&mut self, m: &mut Mob, cx: &mut Cx) {
+        self.dig.cancel(m, cx);
+        m.no_gravity = false;
+    }
+    fn every_tick(&self) -> bool {
+        true
+    }
+    fn tick(&mut self, m: &mut Mob, cx: &mut Cx) {
+        self.step(m, cx);
+        if horai_tier(m) == 2 && self.fetch.back.is_none() {
+            self.step(m, cx);
+        }
+    }
+    fn box_clone(&self) -> Box<dyn Goal> {
+        Box::new(self.clone())
+    }
+    fn name(&self) -> &'static str {
+        "GigaQuarry"
+    }
+}
+
+impl GigaQuarry {
+    fn step(&mut self, m: &mut Mob, cx: &mut Cx) {
+        let Some(site) = giga_site(m.id) else { return };
+        if self.done {
+            m.no_gravity = false;
+            return;
+        }
+        if self.dig.at.is_none() && self.fetch.tick(m, cx) {
+            return;
+        }
+        let layer = *self.layer.get_or_insert_with(|| {
+            self.cells = giga_cells(site, site[1]);
+            self.hard = 0;
+            site[1]
+        });
+        if let Some(p) = self.dig.at {
+            hold_in(m, [f64::from(p[0]) + 0.5, f64::from(layer + 1), f64::from(p[2]) + 0.5]);
+            if let Some(p) = self.dig.tick(m, cx) {
+                break_out(m, cx, p, centre(p), keep_rock(m.id));
+            }
+            return;
+        }
+        let tier = horai_tier(m);
+        while let Some(p) = self.cells.pop() {
+            let name = name_at(cx.w, p);
+            if &*name == "minecraft:bedrock" {
+                self.hard += 1;
+                continue;
+            }
+            if !can_quarry(cx.w, p) || by_liquid(cx.w, p) {
+                continue;
+            }
+            move_to_cell(m, [p[0], layer + 1, p[2]]);
+            self.dig.begin(cx.w, tier, p, boost(m.id));
+            return;
+        }
+        // The layer is done. Half of it bedrock, or the bottom of the world: the pit is finished.
+        let next = layer - 1;
+        if next < WORLD_BOTTOM || self.hard * 2 >= (GIGA_SIZE * GIGA_SIZE) as usize {
+            self.done = true;
+            say(m.id, 1, "Giga quarry done: bedrock!");
+            return;
+        }
+        self.layer = Some(next);
+        self.cells = giga_cells(site, next);
+        self.hard = 0;
+    }
+}
+
 
 const SEEK_ACROSS: i32 = 16;
 const SEEK_UP: i32 = 12;
@@ -3607,20 +4105,23 @@ struct SeekOre {
 impl SeekOre {
     fn find(&mut self, m: &Mob, cx: &Cx) -> Option<[i32; 3]> {
         let me = [m.position.x.floor() as i32, m.position.y.floor() as i32, m.position.z.floor() as i32];
-        let owner = player_position(cx)?;
+        let owner = owner_position(m, cx)?;
         let mut found = Vec::new();
         for dy in -SEEK_UP..=SEEK_UP {
             for dx in -SEEK_ACROSS..=SEEK_ACROSS {
                 for dz in -SEEK_ACROSS..=SEEK_ACROSS {
                     let p = add(me, [dx, dy, dz]);
-                    if seeks(m, &name_at(cx.w, p)) && !self.bad.contains(&p) {
-                        found.push(p);
+                    let name = name_at(cx.w, p);
+                    if seeks(m, &name) && !self.bad.contains(&p) {
+                        found.push((ore_rank(&name), p));
                     }
                 }
             }
         }
-        found.sort_by_key(|&p| steps(p, me));
-        for p in found {
+        // The best ores first, the nearest of them first: ancient debris, diamonds, gold and
+        // emeralds; then every other ore; coal last.
+        found.sort_by_key(|&(rank, p)| (rank, steps(p, me)));
+        for (_, p) in found {
             let c = centre(p);
             let (dx, dy, dz) = (c[0] - owner[0], c[1] - owner[1], c[2] - owner[2]);
             if dx * dx + dy * dy + dz * dz > SEEK_FROM_OWNER * SEEK_FROM_OWNER {
@@ -3638,7 +4139,7 @@ impl SeekOre {
     /// Nothing to dig: she keeps by her owner.
     fn follow(&mut self, m: &mut Mob, cx: &mut Cx) {
         self.at = None;
-        let Some(at) = player_position(cx) else { return };
+        let Some(at) = owner_position(m, cx) else { return };
         if distance_sqr(m, at) >= TELEPORT_FROM * TELEPORT_FROM {
             teleport_near(m, cx, at);
         } else if distance_sqr(m, at) > 9.0 && cx.w.game_time % 10 == 0 {
@@ -4369,9 +4870,20 @@ fn rod_of(id: u32) -> Option<Rod> {
     Some(Rod { slot, lure: level("minecraft:lure"), luck: level("minecraft:luck_of_the_sea"), unbreaking: level("minecraft:unbreaking") })
 }
 
+/// The love level from which Wakasagi fishes with Lure III and Luck of the Sea III of her own,
+/// whatever rod she has (a better rod still counts for more).
+pub const NATURAL_FISHER_LEVEL: u32 = 3;
+
+/// Her Lure and Luck of the Sea: her rod's (its Lure and Luck), and from love level 3 at least III
+/// of each.
+pub fn fishing_enchantments(rod: Option<(u32, u32)>, level: u32) -> (u32, u32) {
+    let (lure, luck) = rod.unwrap_or((0, 0));
+    if level >= NATURAL_FISHER_LEVEL { (lure.max(3), luck.max(3)) } else { (lure, luck) }
+}
+
 /// Vanilla's lure time, 5 to 30 seconds, five seconds shorter for each level of Lure on her rod.
 fn lure_wait(m: &mut Mob) -> i32 {
-    let lure = rod_of(m.id).map_or(0, |r| r.lure).min(5) as i32;
+    let lure = fishing_enchantments(rod_of(m.id).map(|r| (r.lure, r.luck)), level_of(m.id)).0.min(5) as i32;
     (100 + m.random.next_int_bound(500).unwrap_or(200) - 100 * lure).max(20)
 }
 
@@ -4502,13 +5014,15 @@ impl Goal for Fishing {
             return;
         }
         let rod = rod_of(m.id);
-        let item = catch(m, rod.map_or(0, |r| r.luck));
+        let luck = fishing_enchantments(rod.as_ref().map(|r| (r.lure, r.luck)), level_of(m.id)).1;
+        let item = catch(m, luck);
         // Favour: a chance of a second catch, 5% a level up to half.
         let again = (m.random.next_int_bound(100).unwrap_or(99) as u32) < (level_of(m.id) * 5).min(50);
-        let second = again.then(|| catch(m, rod.map_or(0, |r| r.luck)));
+        let second = again.then(|| catch(m, luck));
         if let Some(r) = rod {
             wear_rod(m, r);
         }
+        worked(m.id);
         if let Ok(mut c) = CATCHES.lock() {
             c.push((m.id, item));
             if let Some(more) = second {
@@ -4657,6 +5171,15 @@ pub fn set_mission(id: u32, on: bool) {
 
 pub fn on_mission(id: u32) -> bool {
     ON_MISSION.lock().is_ok_and(|m| m.contains(&id))
+}
+
+pub fn missions() -> Vec<u32> {
+    ON_MISSION.lock().map(|m| m.iter().copied().collect()).unwrap_or_default()
+}
+
+/// Every doll on its owner's head now.
+pub fn riders() -> Vec<u32> {
+    STATES.lock().map(|s| s.iter().filter(|(_, s)| s.mode == RIDE && s.enabled).map(|(&id, _)| id).collect()).unwrap_or_default()
 }
 
 pub fn burst(id: u32) {

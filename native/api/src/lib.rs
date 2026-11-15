@@ -4,15 +4,17 @@
 //! to monsters, Germany chops trees, London finds spawners, Russia gathers what is dropped and
 //! lights the dark with torches. The extras: Marisa and Reimu shoot danmaku, Aya takes photos,
 //! Goliath fights, Yuuka farms; Right-click one empty-handed to go Standby, Patrol, Follow, Rideon
-//! and back to Standby; with a Doll Core to switch its AI on and off, or to take over someone
-//! else's doll; with a book to change how much it says; with a chest to open its inventory. Sneak
-//! and right-click it empty-handed, hit it with a Doll Core, or kill it, to get the item back.
+//! and back to Standby; with a Doll Core to switch its AI on and off (a doll obeys only the player
+//! who placed it); with a book to change how much it says; with a chest to open its inventory.
+//! Sneak and right-click it empty-handed, hit it with a Doll Core, or kill it, to get the item
+//! back.
 //!
 //! The fork has no living mod entity types, so a doll is a silent chicken with a custom name: this
 //! mod draws it, and `goals.rs` drives it. A chicken is close to the doll's size and falls slowly,
 //! as the doll did. This crate saves each doll's state and hands it to the goals each tick.
 
 mod model;
+mod net;
 
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
@@ -27,6 +29,7 @@ use horizon_client::mod_api::{
     ScreenRenderPostEvent, ScreenMouseScrolledPreEvent, RightClickBlockEvent,
     MobSubmitEvent, NativeServerPlayer, PlaceBlockEvent, StackData, Tag, Text, TooltipEvent,
     UseItemEvent, UseItemOnEvent, WorldSubmitEvent, Direction, EquipmentSlot, LivingDeathEvent, NativeEffect, ClientTickPostEvent,
+    NetFromClientEvent, NetFromServerEvent, ServerTickEvent, ServerTickPhase,
 };
 
 // The kind every doll is underneath.
@@ -202,6 +205,8 @@ struct DollData {
     /// The level it was at when it took its present form: a Horai or Goliath grows into its next
     /// form three levels on.
     form_level: u32,
+    /// A Horai's giga quarry: its corner (least x and z) and top layer, while she digs it.
+    giga: Option<[i32; 3]>,
 }
 
 impl Default for DollData {
@@ -219,6 +224,7 @@ impl Default for DollData {
             favour: 0,
             form_level: 0,
             anchor: None,
+            giga: None,
         }
     }
 }
@@ -248,6 +254,9 @@ fn encode(data: &DollData) -> Result<Compound, AttachmentError> {
     }
     if data.form_level > 0 {
         tag.insert("form_level".into(), Tag::Int(data.form_level as i32));
+    }
+    if let Some(g) = data.giga {
+        tag.insert("giga".into(), Tag::IntArray(g.to_vec()));
     }
     Ok(tag)
 }
@@ -306,6 +315,10 @@ fn decode(tag: &Compound) -> Result<DollData, AttachmentError> {
             Some(Tag::Int(n)) => (*n).max(0) as u32,
             _ => 0,
         },
+        giga: match tag.get(&"giga".into()) {
+            Some(Tag::IntArray(v)) if v.len() == 3 => Some([v[0], v[1], v[2]]),
+            _ => None,
+        },
     };
     fit_baubles(&mut data);
     Ok(data)
@@ -362,7 +375,9 @@ fn mode_name(mode: u8) -> &'static str {
         goals::FOLLOW => "Follow mode",
         goals::RIDE => "Rideon mode",
         goals::SECRET => "Secret mode: off to find diamonds and ancient debris",
-        goals::SECRET_ALL => "Secret mode, every ore: iron, coal, gold, lapis, redstone and the rest",
+        goals::SECRET_ALL => "Secret mode, every ore: ancient debris, diamonds, gold and emeralds first, coal last",
+        goals::GIGA => "Giga quarry: a 20x20 pit, down to bedrock",
+        goals::BLOOM => "Secret mode: free bonemeal, and her wheat baked into bread",
         _ => "Standby mode",
     }
 }
@@ -385,15 +400,54 @@ fn say(host: &mut dyn Host, id: u32, data: &DollData, level: u8, text: &str) {
     host.tell(data.owner, Text::literal(format!("{name} : {text}")));
 }
 
+/// A doll's sound, at `at`, for everyone near it in its level (`play_local_sound` is this client's
+/// alone, and nothing at all on a dedicated server).
+fn doll_sound(host: &mut dyn Host, id: u32, sound: &str, at: [f64; 3], volume: f32, pitch: f32) {
+    match host.entity(id).and_then(|e| host.entity_level(e)) {
+        Some(level) => {
+            host.level_play_sound(level, sound, at, SOUND_NEUTRAL, volume, pitch);
+        }
+        None => {
+            host.play_local_sound(sound, at, volume, pitch, 0);
+        }
+    }
+}
+
+/// A sound a player made, for everyone near them in `dimension`.
+fn player_sound(host: &mut dyn Host, dimension: &str, sound: &str, at: [f64; 3], volume: f32, pitch: f32) {
+    match host.level(dimension) {
+        Some(level) => {
+            host.level_play_sound(level, sound, at, SOUND_NEUTRAL, volume, pitch);
+        }
+        None => {
+            host.play_local_sound(sound, at, volume, pitch, 0);
+        }
+    }
+}
+
+/// `SoundSource.NEUTRAL`.
+const SOUND_NEUTRAL: usize = 6;
+
 fn click(host: &mut dyn Host, id: u32) {
     if let Some(at) = host.entity(id).and_then(|e| host.entity_position(e)) {
-        host.play_local_sound("minecraft:ui.button.click", at, 0.3, 1.0, 0);
+        doll_sound(host, id, "minecraft:ui.button.click", at, 0.3, 1.0);
     }
 }
 
 fn tell_state(id: u32, data: &DollData) {
     goals::set_state(id, data.mode, data.enabled, data.owner);
+    goals::set_giga_site(id, if data.mode == goals::GIGA { data.giga } else { None });
 }
+
+/// The Horai dolls, each of which can dig a giga quarry.
+fn is_horai(name: &str) -> bool {
+    name == goals::HORAI || name == goals::DIAMOND_HORAI || name == goals::NETHERITE_HORAI
+}
+
+const BLOOM_ITEM: &str = "minecraft:cactus";
+
+/// What a giga quarry is entered with: sneak and right-click a Horai holding this.
+const GIGA_PICKAXE: &str = "minecraft:netherite_pickaxe";
 
 static DOLL: AttachmentType<DollData> = AttachmentType {
     namespace: "alice_dolls",
@@ -677,7 +731,7 @@ fn cook(host: &mut dyn Host, id: u32) {
         remember(id, doll, &data);
     }
     if let Some(at) = host.entity(id).and_then(|e| host.entity_position(e)) {
-        host.play_local_sound("minecraft:block.furnace.fire_crackle", at, 0.5, 1.0, 0);
+        doll_sound(host, id, "minecraft:block.furnace.fire_crackle", at, 0.5, 1.0);
     }
     let _ = DOLL.set(host, holder, data);
 }
@@ -1201,7 +1255,7 @@ impl Mod {
                 if mission.ticks >= STALK_TICKS {
                     mission.phase = Phase::Charge;
                     mission.ticks = 0;
-                    host.play_local_sound("minecraft:entity.creeper.primed", at, 1.0, 0.5, 0);
+                    host.level_play_sound(level, "minecraft:entity.creeper.primed", at, SOUND_HOSTILE, 1.0, 0.5);
                 }
             }
             Phase::Charge => {
@@ -1248,19 +1302,124 @@ static AYA_POV: Mutex<Option<(goals::Photo, i32)>> = Mutex::new(None);
 static AYA_HUD: Mutex<Option<HudMode>> = Mutex::new(None);
 const AYA_POV_FRAMES: i32 = 4;
 
-/// The doll inventory screen open on this client: the doll's name (its title), its slot count, and
-/// which slots are empty, from the server's tick (single player shares the process).
-static MENU_VIEW: Mutex<Option<MenuView>> = Mutex::new(None);
+/// The doll inventory screen each player has open (server side): its title, the doll's slot count,
+/// which slots it shows from where, and which of those are empty. Sent to the player's client
+/// (`net::MENU`) whenever it changes.
+static MENU_VIEWS: LazyLock<Mutex<HashMap<u128, net::Menu>>> = LazyLock::new(Default::default);
+/// What each player's client was last told of their doll screen.
+static MENU_SENT: LazyLock<Mutex<HashMap<u128, Vec<u8>>>> = LazyLock::new(Default::default);
+/// The doll screen open on this client, as the server last said (client side).
+static CLIENT_MENU: Mutex<Option<net::Menu>> = Mutex::new(None);
+/// Wheel turns over a doll screen on this client, not yet sent to the server.
+static CLIENT_SCROLL: Mutex<i32> = Mutex::new(0);
 
-/// The doll screen open: its title, the doll's slot count, which of them the screen shows from
-/// where, and which of those are empty.
-#[derive(Clone, Debug)]
-struct MenuView {
-    title: String,
-    total: usize,
-    offset: usize,
-    view: usize,
-    empty: Vec<bool>,
+/// The dolls' effects round this client's player, as the server last sent them, and when.
+static CLIENT_FX: Mutex<Option<(net::Fx, Instant)>> = Mutex::new(None);
+/// How long the server's last effects stand: past this the client goes by its own (single player's).
+const FX_FRESH: Duration = Duration::from_secs(1);
+/// How far from a player the dolls whose effects they are sent may be.
+const FX_RANGE: f64 = 160.0;
+/// Players last sent no dolls' effects: not sent the empty list again until there are some.
+static FX_QUIET: LazyLock<Mutex<std::collections::HashSet<u128>>> = LazyLock::new(Default::default);
+/// Aya's photos the server sent this client to take.
+static CLIENT_PHOTOS: Mutex<Vec<goals::Photo>> = Mutex::new(Vec::new());
+/// Where each player stood last server tick, for how fast they move.
+static LAST_AT: LazyLock<Mutex<HashMap<u128, [f64; 3]>>> = LazyLock::new(Default::default);
+
+/// `f` on the server's last effects, while they are fresh, with their age.
+fn with_fx<R>(f: impl FnOnce(&net::Fx, Duration) -> R) -> Option<R> {
+    let g = CLIENT_FX.lock().ok()?;
+    let (fx, at) = g.as_ref()?;
+    let age = at.elapsed();
+    (age < FX_FRESH).then(|| f(fx, age))
+}
+
+/// How far through its swing doll `id` is, 0 to 1: by the server's word, else this process's own.
+pub(crate) fn swing_of(id: u32) -> f32 {
+    with_fx(|fx, age| {
+        fx.swings.iter().find(|s| s.0 == id).map_or(0.0, |s| {
+            let p = s.1 + age.as_secs_f32() / 0.3;
+            if p >= 1.0 { 0.0 } else { p }
+        })
+    })
+    .unwrap_or_else(|| goals::swing_progress(id))
+}
+
+fn riding_shown(id: u32) -> bool {
+    with_fx(|fx, _| fx.riders.contains(&id)).unwrap_or_else(|| goals::riding(id))
+}
+
+fn mission_shown(id: u32) -> bool {
+    with_fx(|fx, _| fx.missions.contains(&id)).unwrap_or_else(|| goals::on_mission(id))
+}
+
+fn favour_shown(id: u32) -> Option<(u32, u32, u32)> {
+    with_fx(|fx, _| fx.favour.iter().find(|f| f.0 == id).map(|f| (f.1, f.2, f.3)))
+        .unwrap_or_else(|| FAVOUR_SHOWN.lock().ok().and_then(|s| s.get(&id).copied()))
+}
+
+fn shots_shown() -> Vec<(u8, [f64; 3], [f64; 3])> {
+    with_fx(|fx, _| fx.shots.clone()).unwrap_or_else(goals::flying_shots)
+}
+
+fn beams_shown() -> Vec<([f64; 3], [f64; 3])> {
+    with_fx(|fx, _| fx.beams.clone()).unwrap_or_else(goals::doll_beams)
+}
+
+/// Favour a doll earns for every [`goals::JOBS_PER_LOVE`] jobs done.
+const WORK_FAVOUR: u32 = 10;
+
+// ---- The doll bell: pick which dolls it brings back ----
+
+/// Players who rang the bell, for its picker to open on the next server tick.
+static PENDING_BELL: Mutex<Vec<u128>> = Mutex::new(Vec::new());
+/// Each player's bell picker open: its window and the dolls it lists, in order.
+static BELL_OPEN: LazyLock<Mutex<HashMap<u128, (i32, Vec<u32>)>>> = LazyLock::new(Default::default);
+/// The dolls each player has struck off their bell: every other doll of theirs answers it.
+static BELL_LEFT: LazyLock<Mutex<HashMap<u128, std::collections::HashSet<u32>>>> = LazyLock::new(Default::default);
+/// Most dolls the picker lists: five rows, with the row of buttons under them.
+const BELL_MAX: usize = 45;
+
+/// The bell picker's items: a doll's item for each doll, ticked if it comes, then the buttons.
+fn bell_items(host: &dyn Host, ids: &[u32], left: &std::collections::HashSet<u32>) -> Vec<Option<ItemStack>> {
+    let named = |item: &str, text: &str| {
+        let mut s = ItemStack::new(item, 1);
+        s.extra = Some(Box::new(StackData { custom_name: Some(Tag::String(text.into())), ..StackData::default() }));
+        Some(s)
+    };
+    let rows = ids.len().div_ceil(9).max(1);
+    let mut items: Vec<Option<ItemStack>> = vec![None; rows * 9];
+    for (k, &id) in ids.iter().enumerate() {
+        let Some(doll) = doll_of(host, id) else { continue };
+        let coming = !left.contains(&id);
+        let text = if coming { format!("[x] {} : comes", doll.name) } else { format!("[ ] {} : stays", doll.name) };
+        items[k] = named(if coming { doll.item } else { "minecraft:gray_dye" }, &text);
+    }
+    let mut row = vec![named("minecraft:gray_stained_glass_pane", " "); 9];
+    row[BELL_ALL] = named("minecraft:lime_dye", "Select all");
+    row[BELL_RING] = named("minecraft:bell", "Ring: bring the ticked dolls back");
+    row[BELL_NONE] = named("minecraft:gray_dye", "Select none");
+    items.extend(row);
+    items
+}
+/// `owner`'s dolls in the world, in a steady order.
+fn owned_dolls(owner: u128) -> Vec<u32> {
+    let mut ids: Vec<u32> = KNOWN
+        .lock()
+        .map(|k| k.iter().filter(|(_, k)| k.owner == owner).map(|(id, _)| *id).collect())
+        .unwrap_or_default();
+    ids.sort_unstable();
+    ids
+}
+
+const BELL_ALL: usize = 2;
+const BELL_RING: usize = 4;
+const BELL_NONE: usize = 6;
+
+/// Where the keep-or-void switch is in a doll screen showing `view` of the doll's slots: under them
+/// and the bauble grid, in the middle of its row.
+fn switch_slot(view: usize) -> usize {
+    view + goals::BAUBLE_CELLS + SWITCH_AT
 }
 /// Whether this screen's outlines were logged yet (once a screen, to the debug log).
 static OUTLINES_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -1486,7 +1645,7 @@ impl Mod {
             return;
         }
         if let Some(at) = host.entity(id).and_then(|e| host.entity_position(e)) {
-            host.play_local_sound("minecraft:entity.player.levelup", at, 0.8, 1.2, 0);
+            doll_sound(host, id, "minecraft:entity.player.levelup", at, 0.8, 1.2);
         }
         say(host, id, data, 1, &format!("Love level {after}!"));
         let Some(doll) = doll_of(host, id) else { return };
@@ -1519,7 +1678,7 @@ impl Mod {
         remember(id, next, data);
         tell_state(id, data);
         if let Some(at) = host.entity_position(entity) {
-            host.play_local_sound("minecraft:ui.toast.challenge_complete", at, 1.0, 1.0, 0);
+            doll_sound(host, id, "minecraft:ui.toast.challenge_complete", at, 1.0, 1.0);
         }
         say(host, id, data, 1, &format!("I've become a {}!", next.name));
     }
@@ -1537,41 +1696,53 @@ impl Mod {
         }
         let mut data = DOLL.get(host, holder).unwrap_or_default();
         let name = doll_of(host, id).map_or("Doll", |d| d.name);
+        // A doll takes orders from the player who made it, and no one else: not even with a Doll Core.
         if data.owner != player.uuid {
-            if held != Some(DOLL_CORE) {
-                let text = format!("{name} : You are not my owner!");
-                host.action_bar(player.uuid, Text::literal(text));
-                return Flow::Cancel;
-            }
-            // A Doll Core takes the doll over, and it starts again from Standby.
-            if player.game_mode != 1 {
-                host.take_items(DOLL_CORE, 1);
-            }
-            data.owner = player.uuid;
-            data.mode = goals::STANDBY;
-            if let Some(doll) = doll_of(host, id) {
-                remember(id, doll, &data);
-            }
-            tell_state(id, &data);
-            if let Some(at) = host.entity(id).and_then(|e| host.entity_position(e)) {
-                host.play_local_sound("minecraft:item.flintandsteel.use", at, 1.0, 1.0, 0);
-            }
-            say(host, id, &data, 2, "Activation successful!");
-            let _ = DOLL.set(host, holder, data);
+            let text = format!("{name} : You are not my owner!");
+            host.action_bar(player.uuid, Text::literal(text));
             return Flow::Cancel;
         }
+        // Whether the player who clicked is sneaking (not whoever a doll last saw).
+        let sneaking = player.sneaking;
         if held == Some("minecraft:lead") && self.bind(host, id, &mut data, &player) {
             tell_state(id, &data);
             let _ = DOLL.set(host, holder, data);
             return Flow::Cancel;
         }
-        if goals::player_sneaking() && held == Some("minecraft:crafting_table") && (name == goals::MOSCOW || name == goals::RUSSIA) {
+        if sneaking && held == Some("minecraft:crafting_table") && (name == goals::MOSCOW || name == goals::RUSSIA) {
             self.next_bound(host, id, &mut data, &player);
             tell_state(id, &data);
             let _ = DOLL.set(host, holder, data);
             return Flow::Cancel;
         }
-        if goals::player_sneaking() {
+        // Any Horai, sneak and right-clicked with a netherite pickaxe: the giga quarry, a 20x20 pit
+        // round where she stands, to bedrock. Again, and she stands by.
+        if sneaking && held == Some(GIGA_PICKAXE) && is_horai(name) {
+            if data.mode == goals::GIGA {
+                data.mode = goals::STANDBY;
+                data.giga = None;
+            } else {
+                let Some(at) = host.entity(id).and_then(|e| host.entity_position(e)) else { return Flow::Cancel };
+                data.mode = goals::GIGA;
+                data.enabled = true;
+                data.giga = Some(goals::giga_corner(at.map(|c| c.floor() as i32)));
+            }
+            say(host, id, &data, 1, mode_name(data.mode));
+            click(host, id);
+            tell_state(id, &data);
+            let _ = DOLL.set(host, holder, data);
+            return Flow::Cancel;
+        }
+        if sneaking && held == Some(BLOOM_ITEM) && name == goals::YUUKA {
+            data.mode = if data.mode == goals::BLOOM { goals::STANDBY } else { goals::BLOOM };
+            data.enabled = true;
+            say(host, id, &data, 1, mode_name(data.mode));
+            click(host, id);
+            tell_state(id, &data);
+            let _ = DOLL.set(host, holder, data);
+            return Flow::Cancel;
+        }
+        if sneaking {
             let seeker = doll_of(host, id).is_some_and(|d| d.name == goals::DIAMOND_HORAI || d.name == goals::NETHERITE_HORAI);
             let glass = held == Some("minecraft:red_stained_glass");
             let to = if data.mode == goals::SECRET && glass {
@@ -1592,7 +1763,7 @@ impl Mod {
                 return Flow::Cancel;
             }
         }
-        if held.is_none() && goals::player_sneaking() {
+        if held.is_none() && sneaking {
             // Sneak and right-click with an empty hand: the doll comes back as its item, with what
             // it carries.
             if let Some(doll) = doll_of(host, id) {
@@ -1622,7 +1793,7 @@ impl Mod {
             Some(item) if point_favour(item).is_some() => {
                 let worth = point_favour(item).unwrap_or(POINT_FAVOUR);
                 let held_count = stack.map_or(1, |s| s.count.max(1));
-                let n = if goals::player_sneaking() { 1 } else { held_count };
+                let n = if sneaking { 1 } else { held_count };
                 let given = if player.game_mode == 1 { n } else { host.take_items(item, n) };
                 if given > 0 {
                     self.add_favour(host, id, &mut data, given * worth);
@@ -1745,7 +1916,7 @@ impl Mod {
         let short = stack.item.rsplit(':').next().unwrap_or("armour").replace('_', " ");
         say(host, id, data, 1, &format!("Wearing the {short}"));
         if let Some(at) = host.entity(id).and_then(|e| host.entity_position(e)) {
-            host.play_local_sound("minecraft:item.armor.equip_iron", at, 1.0, 1.0, 0);
+            doll_sound(host, id, "minecraft:item.armor.equip_iron", at, 1.0, 1.0);
         }
         goals::put_inventory(id, items.clone());
         data.items = items;
@@ -1779,7 +1950,7 @@ impl Mod {
         }
         say(host, id, data, 1, "I'll fish with this one");
         if let Some(at) = host.entity(id).and_then(|e| host.entity_position(e)) {
-            host.play_local_sound("minecraft:entity.fishing_bobber.throw", at, 0.8, 1.0, 0);
+            doll_sound(host, id, "minecraft:entity.fishing_bobber.throw", at, 0.8, 1.0);
         }
         goals::put_inventory(id, items.clone());
         data.items = items;
@@ -1793,7 +1964,7 @@ impl Mod {
     /// Whether the click was this.
     fn bind(&self, host: &mut dyn Host, id: u32, data: &mut DollData, player: &NativeServerPlayer) -> bool {
         let name = doll_of(host, id).map_or("", |d| d.name);
-        if (name == goals::MOSCOW || name == goals::RUSSIA) && goals::player_sneaking() {
+        if (name == goals::MOSCOW || name == goals::RUSSIA) && player.sneaking {
             if data.bound != 0 {
                 data.bound = 0;
                 goals::set_bound(id, None);
@@ -1858,16 +2029,120 @@ impl Mod {
         click(host, id);
     }
 
-    /// The doll bell: every one of the ringer's dolls teleports to them and stands by.
+    /// The doll bell. Sneak and ring it: every one of the ringer's dolls teleports to them and stands
+    /// by. Ring it: a screen of their dolls, to tick which come, and ring from there.
     fn ring_bell(&self, host: &mut dyn Host) -> Flow {
         let Some(player) = host.acting_player() else { return Flow::Continue };
         if !fresh_click(player.uuid) {
             return Flow::Cancel;
         }
-        let ids: Vec<u32> = KNOWN
-            .lock()
-            .map(|k| k.iter().filter(|(_, k)| k.owner == player.uuid).map(|(id, _)| *id).collect())
-            .unwrap_or_default();
+        if !player.sneaking {
+            PENDING_BELL.lock().ok().map(|mut p| p.push(player.uuid));
+            return Flow::Cancel;
+        }
+        let ids = owned_dolls(player.uuid);
+        self.recall(host, &player, ids);
+        Flow::Cancel
+    }
+
+    /// The bell picker, for `player`'s dolls.
+    fn open_bell(&self, host: &mut dyn Host, player: u128) {
+        let mut ids = owned_dolls(player);
+        ids.truncate(BELL_MAX);
+        if ids.is_empty() {
+            host.action_bar(player, Text::literal("You have no dolls out to ring for"));
+            return;
+        }
+        let left = BELL_LEFT.lock().ok().and_then(|l| l.get(&player).cloned()).unwrap_or_default();
+        let items = bell_items(host, &ids, &left);
+        let rows = (items.len() / 9).clamp(1, 6) as u8;
+        let Some(window) = host.open_menu(player, rows, Text::literal("Doll bell: which dolls come back?"), items) else { return };
+        BELL_OPEN.lock().ok().map(|mut b| b.insert(player, (window, ids)));
+    }
+
+    /// A click in the bell picker: a doll ticked or not, all or none, or the bell rung.
+    fn bell_clicked(&self, host: &mut dyn Host, player: u128, ids: &[u32], slot: i32) {
+        let Ok(slot) = usize::try_from(slot) else { return };
+        let buttons = ids.len().div_ceil(9).max(1) * 9;
+        {
+            let Ok(mut all) = BELL_LEFT.lock() else { return };
+            let left = all.entry(player).or_default();
+            if slot < ids.len() {
+                let id = ids[slot];
+                if !left.remove(&id) {
+                    left.insert(id);
+                }
+            } else if slot == buttons + BELL_ALL {
+                left.clear();
+            } else if slot == buttons + BELL_NONE {
+                left.extend(ids.iter().copied());
+            } else if slot != buttons + BELL_RING {
+                return;
+            }
+        }
+        if slot == buttons + BELL_RING {
+            BELL_OPEN.lock().ok().map(|mut b| b.remove(&player));
+            host.close_menu(player);
+            let left = BELL_LEFT.lock().ok().and_then(|l| l.get(&player).cloned()).unwrap_or_default();
+            let chosen: Vec<u32> = ids.iter().copied().filter(|id| !left.contains(id)).collect();
+            if let Some(p) = host.server_players().into_iter().find(|p| p.uuid == player) {
+                self.recall(host, &p, chosen);
+            }
+            return;
+        }
+        let left = BELL_LEFT.lock().ok().and_then(|l| l.get(&player).cloned()).unwrap_or_default();
+        host.set_menu_items(player, bell_items(host, ids, &left));
+        if let Some(p) = host.server_players().into_iter().find(|p| p.uuid == player) {
+            player_sound(host, &p.dimension, "minecraft:ui.button.click", p.position, 0.4, 1.2);
+        }
+    }
+
+    fn send_fx(&self, host: &mut dyn Host, players: &[NativeServerPlayer]) {
+        let ids: Vec<u32> = KNOWN.lock().map(|k| k.keys().copied().collect()).unwrap_or_default();
+        let dolls: Vec<(u32, String, [f64; 3])> = ids
+            .into_iter()
+            .filter_map(|id| {
+                let e = host.entity(id)?;
+                Some((id, host.entity_level(e)?.dimension().to_owned(), host.entity_position(e)?))
+            })
+            .collect();
+        let shots = goals::shots_by_doll();
+        let beams = goals::beams_by_doll();
+        let swings = goals::swings();
+        let riders = goals::riders();
+        let missions = goals::missions();
+        let favour: HashMap<u32, (u32, u32, u32)> = FAVOUR_SHOWN.lock().map(|f| f.clone()).unwrap_or_default();
+        for p in players {
+            let near: std::collections::HashSet<u32> = dolls
+                .iter()
+                .filter(|(_, d, at)| *d == p.dimension && (0..3).map(|i| (at[i] - p.position[i]).powi(2)).sum::<f64>() < FX_RANGE * FX_RANGE)
+                .map(|d| d.0)
+                .collect();
+            let quiet = near.is_empty();
+            if quiet && FX_QUIET.lock().is_ok_and(|q| q.contains(&p.uuid)) {
+                continue;
+            }
+            let fx = net::Fx {
+                shots: shots.iter().filter(|s| near.contains(&s.0)).map(|s| (s.1, s.2, s.3)).collect(),
+                beams: beams.iter().filter(|b| near.contains(&b.0)).map(|b| (b.1, b.2)).collect(),
+                swings: swings.iter().filter(|s| near.contains(&s.0)).copied().collect(),
+                riders: riders.iter().filter(|r| near.contains(r)).copied().collect(),
+                missions: missions.iter().filter(|m| near.contains(m)).copied().collect(),
+                favour: near.iter().filter_map(|id| favour.get(id).map(|f| (*id, f.0, f.1, f.2))).collect(),
+            };
+            let _ = host.net_send_to_player(p.uuid, net::FX, &net::encode_fx(&fx));
+            if let Ok(mut q) = FX_QUIET.lock() {
+                if quiet {
+                    q.insert(p.uuid);
+                } else {
+                    q.remove(&p.uuid);
+                }
+            }
+        }
+    }
+
+    /// Dolls `ids` teleport to `player` and stand by.
+    fn recall(&self, host: &mut dyn Host, player: &NativeServerPlayer, ids: Vec<u32>) {
         let mut came = 0;
         for (n, id) in ids.into_iter().enumerate() {
             let a = n as f64 * 2.4;
@@ -1884,14 +2159,13 @@ impl Mod {
                 let _ = DOLL.set(host, holder, data);
             }
         }
-        host.play_local_sound("minecraft:block.bell.use", player.position, 1.0, 1.4, 0);
+        player_sound(host, &player.dimension, "minecraft:block.bell.use", player.position, 1.0, 1.4);
         let text = match came {
             0 => "No dolls answered the bell".to_owned(),
             1 => "1 doll came back, on standby".to_owned(),
             n => format!("{n} dolls came back, on standby"),
         };
         host.action_bar(player.uuid, Text::literal(text));
-        Flow::Cancel
     }
 
     /// A Moscow doll empties the doll she is bound to when it is full, into her own stacks of 128:
@@ -1980,9 +2254,7 @@ impl Mod {
         OPEN.lock().ok().map(|mut o| o.remove(&player));
         GRID_OPEN.lock().ok().map(|mut g| g.remove(&player));
         goals::set_doll_menu(player, window, None);
-        if let Ok(mut v) = MENU_VIEW.lock() {
-            *v = None;
-        }
+        MENU_VIEWS.lock().ok().map(|mut v| v.remove(&player));
         let total = doll_of(host, id).map_or(0, |d| d.slots).div_ceil(9);
         if let Ok(mut s) = SCROLL.lock() {
             let top = s.get(&player).copied().unwrap_or(0) as i32 + rows;
@@ -2000,9 +2272,7 @@ impl Mod {
             debug(host, &format!("inventory {id}: a doll screen of this player's was left over; cleared"));
             OPEN.lock().ok().map(|mut o| o.remove(&player));
             GRID_OPEN.lock().ok().map(|mut g| g.remove(&player));
-            if let Ok(mut v) = MENU_VIEW.lock() {
-                *v = None;
-            }
+            MENU_VIEWS.lock().ok().map(|mut v| v.remove(&player));
         }
         // A doll held open while no player has a doll screen: the same.
         if goals::chest_open().is_some() && OPEN.lock().is_ok_and(|o| o.is_empty()) {
@@ -2065,8 +2335,8 @@ impl Mod {
         if size > goals::ARMOUR_SLOTS + 1 {
             host.action_bar(player, Text::literal("Last 4 slots: armour (helmet last) · the one before: shield · the 3x3 below: baubles"));
         }
-        if let Ok(mut v) = MENU_VIEW.lock() {
-            *v = Some(MenuView { title: title.clone(), total: size, offset, view, empty: vec![false; view] });
+        if let Ok(mut v) = MENU_VIEWS.lock() {
+            v.insert(player, net::Menu { title: title.clone(), total: size, offset, view, empty: vec![false; view] });
         }
         goals::set_chest_open(Some(id));
         // What the screen shows is the menu's while it is open; the rest stays the doll's.
@@ -2196,7 +2466,7 @@ fn collect(host: &mut dyn Host, id: u32, moscow: bool) {
     if taken.is_empty() {
         return;
     }
-    host.play_local_sound("minecraft:entity.item.pickup", at, 0.2, 2.0, 0);
+    doll_sound(host, id, "minecraft:entity.item.pickup", at, 0.2, 2.0);
     for (item, count) in &taken {
         let short = item.strip_prefix("minecraft:").unwrap_or(item);
         say(host, id, &data, 3, &format!("{short} x{count}"));
@@ -2280,8 +2550,8 @@ impl Hooks for Mod {
     /// Marisa's stars and Reimu's amulets, as danmaku facing the camera: a star a yellow glow with a
     /// white core, an amulet a red talisman.
     fn world_submit(&self, host: &dyn Host, event: &mut WorldSubmitEvent<'_>) {
-        let shots = goals::flying_shots();
-        let beams = goals::doll_beams();
+        let shots = shots_shown();
+        let beams = beams_shown();
         let marked = HIGHLIGHT
             .lock()
             .ok()
@@ -2433,9 +2703,7 @@ impl Hooks for Mod {
             open.remove(&event.uuid);
         }
         goals::set_doll_menu(event.uuid, window, None);
-        if let Ok(mut v) = MENU_VIEW.lock() {
-            *v = None;
-        }
+        MENU_VIEWS.lock().ok().map(|mut v| v.remove(&event.uuid));
         let size = doll_of(host, id).map_or(event.slots.len(), |d| d.slots);
         let (offset, view) = GRID_OPEN.lock().ok().and_then(|mut g| g.remove(&event.uuid)).unwrap_or_else(|| {
             // Its layout missing: read as the whole inventory, no grid (the doll is let go either way).
@@ -2469,7 +2737,7 @@ impl Hooks for Mod {
     /// The outlines of a doll's armour and shield slots, where they are empty, as vanilla draws them
     /// in the player's own inventory and Touhou Little Maid in its maid's.
     fn screen_render_post(&self, host: &dyn Host, event: &mut ScreenRenderPostEvent<'_>) {
-        let Some(MenuView { title: name, total: size, offset, view, empty }) = MENU_VIEW.lock().ok().and_then(|v| v.clone()) else {
+        let Some(net::Menu { title: name, total: size, offset, view, empty }) = CLIENT_MENU.lock().ok().and_then(|v| v.clone()) else {
             return;
         };
         if event.screen.title.is_none_or(|t| t.plain() != name) || size <= goals::ARMOUR_SLOTS {
@@ -2500,14 +2768,15 @@ impl Hooks for Mod {
 
     /// The mouse wheel over a doll screen that scrolls: a row up or down.
     fn screen_mouse_scrolled_pre(&self, _: &dyn Host, event: &mut ScreenMouseScrolledPreEvent<'_>) -> Flow {
-        let Some(view) = MENU_VIEW.lock().ok().and_then(|v| v.clone()) else { return Flow::Continue };
+        let Some(view) = CLIENT_MENU.lock().ok().and_then(|v| v.clone()) else { return Flow::Continue };
         let scrolls = view.view < view.total;
         if !scrolls || event.screen.title.is_none_or(|t| t.plain() != view.title) || event.scroll[1] == 0.0 {
             return Flow::Continue;
         }
         let rows = if event.scroll[1] > 0.0 { -1 } else { 1 };
-        if let Ok(mut s) = SCROLLED.lock() {
-            s.push((0, rows));
+        // To the server, which keeps the screen: sent on the next client tick.
+        if let Ok(mut s) = CLIENT_SCROLL.lock() {
+            *s = (*s + rows).clamp(-3, 3);
         }
         Flow::Cancel
     }
@@ -2519,7 +2788,12 @@ impl Hooks for Mod {
         if pov_over && let Some(mode) = AYA_HUD.lock().ok().and_then(|mut h| h.take()) {
             host.set_hud_mode(mode);
         }
-        for photo in goals::take_photos() {
+        let turned = CLIENT_SCROLL.lock().map(|mut s| std::mem::take(&mut *s)).unwrap_or(0);
+        if turned != 0 {
+            let _ = host.net_send_to_server(net::SCROLL, &net::encode_scroll(turned));
+        }
+        let photos: Vec<goals::Photo> = CLIENT_PHOTOS.lock().map(|mut p| std::mem::take(&mut *p)).unwrap_or_default();
+        for photo in photos {
             // The next frames are drawn from Aya's eyes with no HUD or hand, and the screenshot
             // is of the first.
             if let Ok(mut pov) = AYA_POV.lock() {
@@ -2543,7 +2817,7 @@ impl Hooks for Mod {
         if event.kind != KIND {
             return;
         }
-        let Some((level, into, need)) = FAVOUR_SHOWN.lock().ok().and_then(|s| s.get(&event.entity_id).copied()) else { return };
+        let Some((level, into, need)) = favour_shown(event.entity_id) else { return };
         let Some(doll) = doll_of(host, event.entity_id) else { return };
         *event.text = Some(favour_tag(doll.name, level, into, need));
     }
@@ -2563,6 +2837,12 @@ impl Hooks for Mod {
 
     /// The keep-or-void switch in a Diamond or Netherite Horai's inventory screen.
     fn menu_clicked(&self, host: &mut dyn Host, event: &mut MenuClickedEvent) {
+        if let Some((window, ids)) = BELL_OPEN.lock().ok().and_then(|b| b.get(&event.uuid).cloned())
+            && window == event.window
+        {
+            self.bell_clicked(host, event.uuid, &ids, event.slot);
+            return;
+        }
         if let Some((doll, window, players)) = PICKING.lock().ok().and_then(|p| p.get(&event.uuid).cloned())
             && window == event.window
         {
@@ -2582,18 +2862,20 @@ impl Hooks for Mod {
             return;
         }
         let Some(doll) = doll_of(host, id) else { return };
-        if !has_rock_switch(doll.name) || event.slot != (doll.slots + SWITCH_AT) as i32 {
+        let Some((_, view)) = GRID_OPEN.lock().ok().and_then(|g| g.get(&event.uuid).copied()) else { return };
+        if !has_rock_switch(doll.name) || event.slot != switch_slot(view) as i32 {
             return;
         }
         let holder = Holder::Entity(id);
         let mut data = DOLL.get(host, holder).unwrap_or_default();
         data.keep_rock = !data.keep_rock;
         goals::set_keep_rock(id, data.keep_rock);
-        let mut shown = vec![None; doll.slots];
+        // Only the switch row changes: the slots and the bauble grid are the player's to fill.
+        let mut shown = vec![None; view + goals::BAUBLE_CELLS];
         shown.extend(switch_row(data.keep_rock));
         host.set_menu_items(event.uuid, shown);
         if let Some(at) = host.entity(id).and_then(|e| host.entity_position(e)) {
-            host.play_local_sound("minecraft:ui.button.click", at, 0.6, 1.0, 0);
+            doll_sound(host, id, "minecraft:ui.button.click", at, 0.6, 1.0);
         }
         let _ = DOLL.set(host, holder, data);
     }
@@ -2629,7 +2911,7 @@ impl Hooks for Mod {
         ANCHORS_CHANGED.store(true, std::sync::atomic::Ordering::Relaxed);
         host.action_bar(player.uuid, Text::literal(format!("Doll anchor radius: {next} blocks")));
         let at = event.pos.map(|c| f64::from(c) + 0.5);
-        host.play_local_sound("minecraft:block.note_block.chime", at, 0.6, 0.5 + next as f32 / 100.0, 0);
+        player_sound(host, &player.dimension, "minecraft:block.note_block.chime", at, 0.6, 0.5 + next as f32 / 100.0);
         Flow::Cancel
     }
 
@@ -2648,6 +2930,11 @@ impl Hooks for Mod {
     }
 
     fn menu_closed(&self, _: &mut dyn Host, event: &mut MenuClosedEvent) {
+        if let Ok(mut b) = BELL_OPEN.lock()
+            && b.get(&event.uuid).is_some_and(|(w, _)| *w == event.window)
+        {
+            b.remove(&event.uuid);
+        }
         if let Ok(mut p) = PICKING.lock()
             && p.get(&event.uuid).is_some_and(|(_, w, _)| *w == event.window)
         {
@@ -2701,6 +2988,10 @@ impl Hooks for Mod {
             return Flow::Continue;
         };
         let data = DOLL.get(host, Holder::Entity(id)).unwrap_or_default();
+        if data.owner != 0 && data.owner != player.uuid {
+            host.action_bar(player.uuid, Text::literal(format!("{} : You are not my owner!", doll.name)));
+            return Flow::Cancel;
+        }
         forget(id);
         host.remove_mob(&player.dimension, id);
         if data.xp > 0 {
@@ -2717,6 +3008,113 @@ impl Hooks for Mod {
         };
         give_to_owner(host, player.uuid, belongings(&k));
         Flow::Cancel
+    }
+
+    /// At the end of each server tick: where every player is, for the dolls that follow, ride and dig
+    /// by their owner; the bell pickers asked for; and each player's client told what the dolls round
+    /// them are doing, which only the server knows.
+    fn server_tick(&self, host: &mut dyn Host, event: &mut ServerTickEvent<'_>) {
+        if !matches!(event.phase, ServerTickPhase::ServerTickEnd { .. }) {
+            return;
+        }
+        let players = host.server_players();
+        if let Ok(mut last) = LAST_AT.lock() {
+            let seen: Vec<(u128, goals::OwnerSeen)> = players
+                .iter()
+                .map(|p| {
+                    let was = last.get(&p.uuid).copied().unwrap_or(p.position);
+                    let eye_height = if p.eye_height > 0.0 { f64::from(p.eye_height) } else if p.sneaking { 1.27 } else { 1.62 };
+                    let seen = goals::OwnerSeen {
+                        position: p.position,
+                        eye: [p.position[0], p.position[1] + eye_height, p.position[2]],
+                        velocity: [0, 1, 2].map(|i| p.position[i] - was[i]),
+                        yaw: p.yaw,
+                        look: goals::look_of(p.yaw, p.pitch),
+                        sneaking: p.sneaking,
+                        spectator: p.game_mode == 3,
+                        dimension: goals::dimension_code(&p.dimension),
+                    };
+                    (p.uuid, seen)
+                })
+                .collect();
+            last.clear();
+            last.extend(players.iter().map(|p| (p.uuid, p.position)));
+            goals::set_owners(seen);
+        }
+        let bells: Vec<u128> = PENDING_BELL.lock().map(|mut p| std::mem::take(&mut *p)).unwrap_or_default();
+        for player in bells {
+            self.open_bell(host, player);
+        }
+        self.send_fx(host, &players);
+        // Doll screens: each viewer's client told of theirs when it changes, and when it closes.
+        let views: HashMap<u128, Vec<u8>> =
+            MENU_VIEWS.lock().map(|v| v.iter().map(|(p, m)| (*p, net::encode_menu(Some(m)))).collect()).unwrap_or_default();
+        let mut sends: Vec<(u128, Vec<u8>)> = Vec::new();
+        if let Ok(mut sent) = MENU_SENT.lock() {
+            for (player, bytes) in &views {
+                if sent.get(player) != Some(bytes) {
+                    sends.push((*player, bytes.clone()));
+                    sent.insert(*player, bytes.clone());
+                }
+            }
+            let gone: Vec<u128> = sent.keys().filter(|p| !views.contains_key(p)).copied().collect();
+            for player in gone {
+                sent.remove(&player);
+                sends.push((player, net::encode_menu(None)));
+            }
+        }
+        for (player, bytes) in sends {
+            let _ = host.net_send_to_player(player, net::MENU, &bytes);
+        }
+        // Aya's photos: taken on her owner's own screen.
+        for photo in goals::take_photos() {
+            if let Some(k) = known(photo.doll) {
+                let _ = host.net_send_to_player(k.owner, net::PHOTO, &net::encode_photo(photo.eye, photo.yaw, photo.pitch));
+            }
+        }
+    }
+
+    /// The server's word on the dolls round this client's player, and on its doll screen and photos.
+    fn net_from_server(&self, _: &mut dyn Host, event: &mut NetFromServerEvent<'_>) {
+        match event.channel {
+            net::FX => {
+                if let Some(fx) = net::decode_fx(event.data)
+                    && let Ok(mut c) = CLIENT_FX.lock()
+                {
+                    *c = Some((fx, Instant::now()));
+                }
+            }
+            net::MENU => {
+                if let Ok(menu) = net::decode_menu(event.data)
+                    && let Ok(mut c) = CLIENT_MENU.lock()
+                {
+                    if menu.is_some() {
+                        OUTLINES_LOGGED.store(false, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    *c = menu;
+                }
+            }
+            net::PHOTO => {
+                if let Some((eye, yaw, pitch)) = net::decode_photo(event.data)
+                    && let Ok(mut p) = CLIENT_PHOTOS.lock()
+                    && p.len() < 4
+                {
+                    p.push(goals::Photo { doll: 0, eye, yaw, pitch });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// A player's client turned the wheel over their doll screen.
+    fn net_from_client(&self, _: &mut dyn Host, event: &mut NetFromClientEvent<'_>) {
+        if event.channel == net::SCROLL
+            && let Some(rows) = net::decode_scroll(event.data)
+            && let Ok(mut s) = SCROLLED.lock()
+            && s.len() < 64
+        {
+            s.push((event.player, rows));
+        }
     }
 
     fn entity_tick_listened(&self, _: &mut dyn Host, event: &mut EntityTickListenedEvent) {
@@ -2778,11 +3176,25 @@ impl Hooks for Mod {
         // A wheel turn on a long doll inventory: the screen closes (keeping what it showed) and opens
         // again a row further on.
         let turns: Vec<(u128, i32)> = SCROLLED.lock().map(|mut s| std::mem::take(&mut *s)).unwrap_or_default();
-        let rows: i32 = turns.iter().map(|(_, r)| r).sum();
-        if !turns.is_empty()
-            && let Some((player, (doll, window))) = OPEN.lock().ok().and_then(|o| o.iter().next().map(|(p, v)| (*p, *v)))
-        {
-            self.scroll_inventory(host, player, doll, window, rows);
+        let mut by_player: HashMap<u128, i32> = HashMap::new();
+        for (player, rows) in turns {
+            *by_player.entry(player).or_default() += rows;
+        }
+        for (player, rows) in by_player {
+            if rows != 0
+                && let Some((doll, window)) = OPEN.lock().ok().and_then(|o| o.get(&player).copied())
+            {
+                self.scroll_inventory(host, player, doll, window, rows);
+            }
+        }
+        // Every twenty jobs a doll does, it likes its owner a little more.
+        for worker in goals::take_worked() {
+            let holder = Holder::Entity(worker);
+            if DOLL.has(host, holder).unwrap_or(false) {
+                let mut data = DOLL.get(host, holder).unwrap_or_default();
+                self.add_favour(host, worker, &mut data, WORK_FAVOUR);
+                let _ = DOLL.set(host, holder, data);
+            }
         }
         // Reopened once the old screen has really closed (and saved what it showed).
         let waiting: Vec<(u128, u32, u8)> = REOPEN.lock().map(|mut r| std::mem::take(&mut *r)).unwrap_or_default();
@@ -2938,8 +3350,8 @@ impl Hooks for Mod {
         let viewer = OPEN.lock().ok().and_then(|o| o.iter().find(|(_, (d, _))| *d == id).map(|(p, _)| *p));
         if let Some(player) = viewer
             && let Some(contents) = host.menu_contents(player)
-            && let Ok(mut v) = MENU_VIEW.lock()
-            && let Some(view) = v.as_mut()
+            && let Ok(mut v) = MENU_VIEWS.lock()
+            && let Some(view) = v.get_mut(&player)
         {
             view.empty = (0..view.view).map(|i| contents.get(i).is_none_or(Option::is_none)).collect();
         }
@@ -2981,7 +3393,7 @@ impl Hooks for Mod {
             cook(host, id);
         }
         // Every doll at work picks up what is dropped around it.
-        if data.enabled && matches!(data.mode, goals::PATROL | goals::FOLLOW | goals::SECRET | goals::SECRET_ALL) {
+        if data.enabled && matches!(data.mode, goals::PATROL | goals::FOLLOW | goals::SECRET | goals::SECRET_ALL | goals::GIGA | goals::BLOOM) {
             collect(host, id, moscow);
         } else {
             goals::set_item_target(id, None);
@@ -3018,8 +3430,8 @@ impl Hooks for Mod {
                 ANCHORS_CHANGED.store(true, std::sync::atomic::Ordering::Relaxed);
             }
             // A block the player broke: a Diamond or Netherite Horai on their head digs on.
-            if event.context.player.is_some() {
-                goals::player_dug(pos);
+            if let Some(player) = event.context.player {
+                goals::player_dug(player, pos);
             }
         }
         let Some((id, KIND)) = event.context.entity else {
@@ -3192,7 +3604,7 @@ impl Hooks for Mod {
         goals::set_baubles(id, worn_names(&data.baubles));
         let _ = DOLL.set(host, holder, data);
         if let Some(at) = host.entity(id).and_then(|e| host.entity_position(e)) {
-            host.play_local_sound("minecraft:item.totem.use", at, 1.0, 1.0, 0);
+            doll_sound(host, id, "minecraft:item.totem.use", at, 1.0, 1.0);
         }
         let data = DOLL.get(host, Holder::Entity(id)).unwrap_or_default();
         say(host, id, &data, 1, "That was close!");
@@ -3220,11 +3632,11 @@ impl Hooks for Mod {
         if event.mob.kind != KIND {
             return Flow::Continue;
         }
-        if goals::on_mission(event.mob.id) {
+        if mission_shown(event.mob.id) {
             return Flow::Cancel;
         }
         // A doll on the head isn't drawn from the eyes it sits over: it would fill the view.
-        if goals::riding(event.mob.id)
+        if riding_shown(event.mob.id)
             && let Some(camera) = host.camera()
             && let Some(at) = host.entity(event.mob.id).and_then(|e| host.entity_position(e))
         {
@@ -3289,6 +3701,7 @@ mod tests {
             xp: 1234,
             favour: 4321,
             form_level: 3,
+            giga: Some([-10, 63, 200]),
         };
         assert_eq!(decode(&encode(&data).unwrap()).unwrap(), data);
         let data = DollData { owner: 7 << 64, ..DollData::default() };
@@ -3504,5 +3917,120 @@ mod tests {
         assert!(matches!(nbt.get(&"Silent".into()), Some(Tag::Byte(1))));
         assert!(matches!(nbt.get(&"CustomName".into()), Some(Tag::String(_))));
         assert!(matches!(nbt.get(&"Health".into()), Some(Tag::Float(b)) if *b == 30.0f32.to_bits()));
+    }
+
+    #[test]
+    fn the_secret_mode_digs_the_best_ores_first_and_coal_last() {
+        for ore in ["minecraft:ancient_debris", "minecraft:diamond_ore", "minecraft:deepslate_diamond_ore", "minecraft:gold_ore",
+            "minecraft:deepslate_gold_ore", "minecraft:nether_gold_ore", "minecraft:emerald_ore", "minecraft:deepslate_emerald_ore"]
+        {
+            assert_eq!(goals::ore_rank(ore), 0, "{ore}");
+        }
+        for ore in ["minecraft:iron_ore", "minecraft:redstone_ore", "minecraft:lapis_ore", "minecraft:copper_ore", "minecraft:nether_quartz_ore"] {
+            assert_eq!(goals::ore_rank(ore), 1, "{ore}");
+        }
+        assert_eq!(goals::ore_rank("minecraft:coal_ore"), 2);
+        assert_eq!(goals::ore_rank("minecraft:deepslate_coal_ore"), 2);
+    }
+
+    #[test]
+    fn coal_and_iron_come_out_as_with_fortune_three() {
+        assert_eq!(goals::fortune_drop("minecraft:coal_ore"), Some("minecraft:coal"));
+        assert_eq!(goals::fortune_drop("minecraft:deepslate_coal_ore"), Some("minecraft:coal"));
+        assert_eq!(goals::fortune_drop("minecraft:iron_ore"), Some("minecraft:raw_iron"));
+        assert_eq!(goals::fortune_drop("minecraft:deepslate_iron_ore"), Some("minecraft:raw_iron"));
+        assert_eq!(goals::fortune_drop("minecraft:diamond_ore"), None);
+        // Fortune III: a roll of 0 to 4, at least one, at most four.
+        let counts: Vec<u32> = (0..5).map(goals::fortune_count).collect();
+        assert_eq!(counts, [1, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn wakasagi_fishes_with_lure_and_luck_three_from_level_three() {
+        assert_eq!(goals::fishing_enchantments(None, 2), (0, 0));
+        assert_eq!(goals::fishing_enchantments(None, goals::NATURAL_FISHER_LEVEL), (3, 3));
+        assert_eq!(goals::fishing_enchantments(Some((5, 1)), 3), (5, 3));
+        assert_eq!(goals::fishing_enchantments(Some((1, 2)), 1), (1, 2));
+    }
+
+    #[test]
+    fn the_giga_quarry_covers_twenty_by_twenty_round_her() {
+        let corner = goals::giga_corner([5, 64, 5]);
+        assert_eq!(corner, [-5, 63, -5]);
+        let cells = goals::giga_cells(corner, 40);
+        assert_eq!(cells.len(), 400);
+        let distinct: std::collections::HashSet<[i32; 3]> = cells.iter().copied().collect();
+        assert_eq!(distinct.len(), 400);
+        assert!(cells.iter().all(|c| c[1] == 40 && (-5..15).contains(&c[0]) && (-5..15).contains(&c[2])));
+        // Each next cell is beside the last: she walks a snake, not back across the pit.
+        assert!(cells.windows(2).all(|w| (w[0][0] - w[1][0]).abs() + (w[0][2] - w[1][2]).abs() == 1));
+    }
+
+    #[test]
+    fn a_players_uuid_reads_from_its_four_ints() {
+        assert_eq!(goals::uuid_of([1, 2, 3, 4]), 1 << 96 | 2 << 64 | 3 << 32 | 4);
+        assert_eq!(goals::uuid_of([-1, 0, 0, -1]), 0xffff_ffff << 96 | 0xffff_ffff);
+    }
+
+    #[test]
+    fn every_twenty_jobs_earn_love() {
+        let id = 0x00ab_cdef;
+        let count = |v: Vec<u32>| v.into_iter().filter(|&w| w == id).count();
+        let mut earned = 0;
+        for _ in 0..goals::JOBS_PER_LOVE * 2 - 1 {
+            goals::worked(id);
+        }
+        earned += count(goals::take_worked());
+        assert_eq!(earned, 1);
+        goals::worked(id);
+        earned += count(goals::take_worked());
+        assert_eq!(earned, 2);
+    }
+
+    #[test]
+    fn the_void_switch_is_where_the_screen_shows_it() {
+        // A Horai's 18 slots, the bauble grid under them, then the switch row.
+        let mut shown: Vec<Option<ItemStack>> = vec![None; 18 + goals::BAUBLE_CELLS];
+        shown.extend(switch_row(true));
+        assert_eq!(switch_slot(18), 49);
+        assert_eq!(shown[switch_slot(18)].as_ref().map(|s| &*s.item), Some("minecraft:cobblestone"));
+        let mut shown: Vec<Option<ItemStack>> = vec![None; 18 + goals::BAUBLE_CELLS];
+        shown.extend(switch_row(false));
+        assert_eq!(shown[switch_slot(18)].as_ref().map(|s| &*s.item), Some("minecraft:lava_bucket"));
+    }
+
+    #[test]
+    fn yuuka_bakes_her_wheat_into_bread() {
+        let total = |items: &[Option<ItemStack>], item: &str| -> u32 {
+            items.iter().flatten().filter(|s| &*s.item == item).map(|s| s.count).sum()
+        };
+        let mut items = vec![
+            Some(ItemStack::new("minecraft:wheat", 64)),
+            Some(ItemStack::new("minecraft:wheat", 2)),
+            None,
+            Some(ItemStack::new("minecraft:bread", 63)),
+            Some(ItemStack::new("minecraft:wheat_seeds", 5)),
+        ];
+        assert_eq!(goals::bake_bread(&mut items), 22);
+        assert_eq!(total(&items, "minecraft:wheat"), 0);
+        assert_eq!(total(&items, "minecraft:bread"), 63 + 22);
+        assert_eq!(total(&items, "minecraft:wheat_seeds"), 5);
+        // Under three, nothing.
+        let mut items = vec![Some(ItemStack::new("minecraft:wheat", 2)), None];
+        assert_eq!(goals::bake_bread(&mut items), 0);
+        assert_eq!(total(&items, "minecraft:wheat"), 2);
+        // No room for the bread: the wheat stays wheat.
+        let mut items = vec![Some(ItemStack::new("minecraft:wheat", 64))];
+        assert_eq!(goals::bake_bread(&mut items), 0);
+        assert_eq!(total(&items, "minecraft:wheat"), 64);
+        assert_eq!(total(&items, "minecraft:bread"), 0);
+    }
+
+    #[test]
+    fn bonemeal_grows_a_crop_two_to_five_ages() {
+        assert_eq!(goals::bloom_age(0, 7, 0), 2);
+        assert_eq!(goals::bloom_age(0, 7, 3), 5);
+        assert_eq!(goals::bloom_age(6, 7, 3), 7);
+        assert_eq!(goals::bloom_age(0, 3, 9), 3);
     }
 }
