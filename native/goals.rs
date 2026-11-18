@@ -1458,7 +1458,12 @@ fn near_owner(m: &Mob, cx: &Cx, s: &Seen) -> bool {
 }
 
 fn enemy(s: &Seen) -> bool {
-    (patrol_target(s) || touhou_attacker(s)) && !is_doll(s.id)
+    (patrol_target(s) || touhou_attacker(s) || angry_golem(s)) && !is_doll(s.id)
+}
+
+/// An iron golem that has turned on the player: fighting dolls go for it like any hostile mob.
+fn angry_golem(s: &Seen) -> bool {
+    s.species == Species::IronGolem && matches!(s.target, Some(Who::Player))
 }
 
 /// A Touhou Mobs mob that is attacking: Touhou Mobs builds them on the wandering trader, and one

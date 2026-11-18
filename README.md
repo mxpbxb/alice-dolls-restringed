@@ -35,7 +35,7 @@ Each recipe is the item in the top left, wool (Goliath: iron blocks), and a Doll
 | Patchouli | book | A sniper: one slow, heavy orb every four seconds at hostile mobs up to 64 blocks off. |
 | Alice | string | Nothing yet |
 
-Fighting dolls go first for whatever is attacking them. A Goliath under half its health hits twice
+Fighting dolls go first for whatever is attacking them, and go for iron golems that turn on you. A Goliath under half its health hits twice
 as hard, and a hostile mob it strikes turns on it rather than on its owner. When a doll is down to
 under 30% of its health, every doll within 16 blocks fights whoever hurt it (those that don't fight
 otherwise too), and if its owner is not within 24 blocks the nearest of the owner's dolls within 8
