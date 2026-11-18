@@ -57,7 +57,7 @@ you or on your head come back to you.
 
 ## Love
 
-Dolls eat food from their inventory to heal, and at work (on patrol, following or on your head) a
+Dolls eat food from their inventory to heal (rotten flesh too), and at work (on patrol, following or on your head) a
 piece every five minutes. They pick up experience orbs, which you take back with a glass bottle.
 Working earns love too: every 20 blocks mined, trees chopped, crops tended, fish caught or blows
 landed. Eating earns love, but not healing what you did to them yourself: hit your own doll, and the food it

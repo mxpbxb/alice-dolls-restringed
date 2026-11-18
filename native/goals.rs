@@ -387,9 +387,9 @@ fn quicker(ticks: i32, boost: f64) -> i32 {
 // ---- Eating ----
 
 /// What a doll eats, and the health it gives back: the food's nutrition, as vanilla fills hunger.
-/// Food that hurts or misleads (rotten flesh, spider eyes, pufferfish, poisonous potatoes, chorus
-/// fruit, suspicious stew) a doll won't touch.
-pub const FOODS: [(&str, f32); 33] = [
+/// Rotten flesh too, which can't make a doll sick. Food that hurts or misleads (spider eyes,
+/// pufferfish, poisonous potatoes, chorus fruit, suspicious stew) a doll won't touch.
+pub const FOODS: [(&str, f32); 34] = [
     ("minecraft:apple", 4.0),
     ("minecraft:baked_potato", 5.0),
     ("minecraft:beetroot", 1.0),
@@ -423,6 +423,7 @@ pub const FOODS: [(&str, f32); 33] = [
     ("minecraft:rabbit", 3.0),
     ("minecraft:cod", 2.0),
     ("minecraft:salmon", 2.0),
+    ("minecraft:rotten_flesh", 4.0),
 ];
 
 pub fn food_heal(item: &str) -> Option<f32> {
