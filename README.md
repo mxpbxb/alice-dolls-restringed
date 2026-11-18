@@ -14,7 +14,7 @@ Install both from the release, then press Build in the launcher:
 
 ## Dolls
 
-Each recipe is the item in the top left, wool (Goliath: iron blocks), and a Doll Core in the middle.
+Each recipe is the item in the top left, wool (Goliath: iron blocks), and a Doll Core in the middle. Patchouli and Alice also take three diamonds, in the other corners.
 
 | Doll | Crafted with | What it does |
 |---|---|---|

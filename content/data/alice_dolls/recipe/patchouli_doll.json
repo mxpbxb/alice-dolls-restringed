@@ -2,14 +2,15 @@
   "type": "minecraft:crafting_shaped",
   "category": "misc",
   "pattern": [
-    "AW ",
+    "AWD",
     "WHW",
-    " W "
+    "DWD"
   ],
   "key": {
     "A": "minecraft:book",
     "W": "#minecraft:wool",
-    "H": "alice_dolls:doll_core"
+    "H": "alice_dolls:doll_core",
+    "D": "minecraft:diamond"
   },
   "result": {
     "id": "alice_dolls:patchouli_doll"
