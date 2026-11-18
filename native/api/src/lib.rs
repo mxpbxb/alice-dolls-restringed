@@ -1,17 +1,17 @@
 //! Alice's Dolls for the eltanschauung/horizon fork: a port of the 1.7.10 mod by iwa_yukinoshita.
 //!
-//! Alice's dolls: Shanghai fights and steals, Horai finds and mines ore, Ooedo blows itself up next
-//! to monsters, Germany chops trees, London finds spawners, Russia gathers what is dropped and
+//! Alice's dolls: Shanghai fights and steals, Horai finds and mines ore, Ooedo blows itself up
+//! next to monsters, Germany chops trees, London finds spawners, Russia gathers what is dropped and
 //! lights the dark with torches. The extras: Marisa and Reimu shoot danmaku, Aya takes photos,
-//! Goliath fights, Yuuka farms; Right-click one empty-handed to go Standby, Patrol, Follow, Rideon
-//! and back to Standby; with a Doll Core to switch its AI on and off (a doll obeys only the player
-//! who placed it); with a book to change how much it says; with a chest to open its inventory.
-//! Sneak and right-click it empty-handed, hit it with a Doll Core, or kill it, to get the item
-//! back.
+//! Goliath fights, Yuuka farms; Wakasagi keeps you company. Right-click one empty-handed to go
+//! Standby, Patrol, Follow, Rideon and back to Standby; with a Doll Core to switch its AI on and
+//! off (a doll obeys only the player who placed it); with a book to change how much it says; with a chest
+//! to open its inventory. Sneak and right-click it empty-handed, hit it with a Doll Core, or kill it,
+//! to get the item back.
 //!
-//! The fork has no living mod entity types, so a doll is a silent chicken with a custom name: this
-//! mod draws it, and `goals.rs` drives it. A chicken is close to the doll's size and falls slowly,
-//! as the doll did. This crate saves each doll's state and hands it to the goals each tick.
+//! The fork has no living mod entity types, so a doll is a silent chicken with a custom name:
+//! this mod draws it, and `goals.rs` drives it. A chicken is close to the doll's size and falls
+//! slowly, as the doll did. This crate saves each doll's state and hands it to the goals each tick.
 
 mod model;
 mod net;
@@ -470,6 +470,7 @@ fn is_horai(name: &str) -> bool {
     name == goals::HORAI || name == goals::DIAMOND_HORAI || name == goals::NETHERITE_HORAI
 }
 
+/// Yuuka's item for her other mode.
 const BLOOM_ITEM: &str = "minecraft:cactus";
 
 /// What a giga quarry is entered with: sneak and right-click a Horai holding this.
@@ -1856,6 +1857,7 @@ impl Mod {
             let _ = DOLL.set(host, holder, data);
             return Flow::Cancel;
         }
+        // Patchouli's other mode, and back to standby.
         if sneaking && held == Some("minecraft:book") && name == goals::PATCHOULI {
             data.mode = if data.mode == goals::SNIPE { goals::STANDBY } else { goals::SNIPE };
             data.enabled = true;
@@ -1875,6 +1877,7 @@ impl Mod {
             return Flow::Cancel;
         }
         if sneaking {
+            // The Diamond and Netherite Horai's other modes, and back to standby.
             let seeker = doll_of(host, id).is_some_and(|d| d.name == goals::DIAMOND_HORAI || d.name == goals::NETHERITE_HORAI);
             let glass = held == Some("minecraft:red_stained_glass");
             let to = if data.mode == goals::SECRET && glass {

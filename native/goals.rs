@@ -98,13 +98,16 @@ pub const STANDBY: u8 = 0;
 pub const PATROL: u8 = 1;
 pub const FOLLOW: u8 = 2;
 pub const RIDE: u8 = 3;
+/// The Diamond and Netherite Horai's ore hunt: off to the nearest diamonds and ancient debris.
 pub const SECRET: u8 = 4;
+/// Its second step: every ore, not only diamonds and ancient debris.
 pub const SECRET_ALL: u8 = 5;
 
 fn secret(m: &Mob) -> bool {
     in_mode(m, SECRET) || in_mode(m, SECRET_ALL)
 }
 
+/// What a hunting doll is after: diamonds and ancient debris, or in the second step every ore.
 fn seeks(m: &Mob, name: &str) -> bool {
     is_treasure(name) || (in_mode(m, SECRET_ALL) && is_ore(name))
 }
@@ -3078,11 +3081,14 @@ impl Goal for Danmaku {
 
 // ---- Patchouli: a sniper's orb ----
 
+/// Patchouli's other mode: she stands where she was put.
 pub const SNIPE: u8 = 8;
+/// How far Patchouli shoots, in each of her modes.
 const SNIPE_RANGE: f64 = 64.0;
 const SNIPE_SECRET_RANGE: f64 = 128.0;
 /// Ticks between her orbs: one every four seconds, the last one landed first.
 const SNIPE_EVERY: i32 = 80;
+/// An orb's damage before her level adds to it.
 const SNIPE_DAMAGE: f32 = 20.0;
 /// Blocks an orb flies a tick, and the ticks it flies before it fades.
 const ORB_SPEED: f64 = 2.0;
@@ -3090,6 +3096,7 @@ const ORB_LIFE: i32 = 100;
 /// How many of the nearest she looks along for a clear shot, at each look round.
 const SNIPE_LOOKS: usize = 8;
 
+/// Who an orb is for: a mob, or a player.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mark {
     Mob(u32),
@@ -3105,6 +3112,9 @@ struct Orb {
     age: i32,
 }
 
+/// Patchouli (on patrol, following, on her owner's head, or in her other mode) fires one slow,
+/// heavy orb at a time at whatever is in range and in sight, whatever is attacking her first. She
+/// doesn't walk up to it: she keeps on with what her mode has her do.
 #[derive(Clone, Debug, Default)]
 struct Snipe {
     mark: Option<Mark>,
@@ -3552,7 +3562,9 @@ impl Goal for GoliathAttack {
 
 // ---- Yuuka: EntityDollAIFarmer ----
 
+/// Ticks between Yuuka's rounds in her other mode.
 pub const BLOOM_GAP: i32 = 4;
+/// Crops she tends each round in her other mode.
 pub const BLOOM_PER_ROUND: usize = 3;
 /// Wheat to a loaf, as at a crafting table.
 pub const BREAD_WHEAT: u32 = 3;
@@ -3747,6 +3759,7 @@ fn forget_trampled(pos: [i32; 3]) {
     }
 }
 
+/// Whether Yuuka is at work: on patrol, or in her other mode.
 fn farming(m: &Mob) -> bool {
     in_mode(m, PATROL) || in_mode(m, BLOOM)
 }
@@ -3766,6 +3779,7 @@ struct Farmer {
 }
 
 impl Farmer {
+    /// Ticks between her looks round for work: a second, shorter with favour; in her other mode, less.
     fn last_scan_gap(&self, m: &Mob) -> i32 {
         if in_mode(m, BLOOM) {
             return BLOOM_GAP;
@@ -3773,6 +3787,7 @@ impl Farmer {
         quicker(20, boost(m.id)).max(4)
     }
 
+    /// Her other mode's round.
     fn bloom(&self, m: &mut Mob, cx: &mut Cx) {
         if !in_mode(m, BLOOM) {
             return;
@@ -4016,6 +4031,8 @@ impl Goal for Farmer {
     }
 }
 
+// ---- The Diamond and Netherite Horai: Efficiency V and Silk Touch, strip-mining from the head, the
+// Netherite one's quarry, and the hunt for diamonds and ancient debris ----
 
 /// 0 the Horai doll, 1 the Diamond Horai, 2 the Netherite Horai.
 fn horai_tier(m: &Mob) -> u8 {
@@ -4039,6 +4056,8 @@ fn dig_ticks(tier: u8, hardness: f32) -> i32 {
     }
 }
 
+/// Which ores the ore hunt digs out first: 0 ancient debris, diamonds, gold and emeralds; 2 coal,
+/// last of all; 1 every other ore.
 pub fn ore_rank(name: &str) -> u8 {
     let s = short(name);
     let s = s.strip_prefix("deepslate_").or_else(|| s.strip_prefix("nether_")).unwrap_or(s);
@@ -4049,6 +4068,7 @@ pub fn ore_rank(name: &str) -> u8 {
     }
 }
 
+/// Diamonds and ancient debris: what the ore hunt is after.
 fn is_treasure(name: &str) -> bool {
     matches!(short(name), "diamond_ore" | "deepslate_diamond_ore" | "ancient_debris")
 }
@@ -4148,6 +4168,8 @@ fn is_doll_block(name: &str) -> bool {
 /// The quarry's scaffolding: climbable, walked through, and it drops nothing.
 pub const PHANTOM_SCAFFOLDING: &str = "alice_dolls:phantom_doll_scaffolding";
 
+/// How far from lava the quarry and the ore hunt keep: seven blocks up or down, three across,
+/// never close enough to fall or step in, not so far that they pass ore by.
 const LAVA_UP: i32 = 7;
 const LAVA_ACROSS: i32 = 3;
 
@@ -4663,6 +4685,7 @@ impl Quarry {
 /// one twice over, as in her quarry). She never digs a block beside lava or water, so the pit
 /// doesn't flood: those stay as walls. Again, or any other order, ends it.
 pub const GIGA: u8 = 6;
+/// Yuuka's other mode.
 pub const BLOOM: u8 = 7;
 /// Its width and length.
 pub const GIGA_SIZE: i32 = 20;
@@ -4805,11 +4828,16 @@ impl GigaQuarry {
     }
 }
 
+// ---- The ore hunt ----
 
+/// How far around her the ore hunt looks, across and up or down, and how far from her owner it
+/// will go.
 const SEEK_ACROSS: i32 = 16;
 const SEEK_UP: i32 = 12;
 const SEEK_FROM_OWNER: f64 = 40.0;
 
+/// The ore hunt: the Diamond or Netherite Horai tunnels to the nearest diamonds and ancient debris,
+/// never within seven blocks of lava, and digs them out, Silk Touch and all.
 #[derive(Clone, Debug, Default)]
 struct SeekOre {
     target: Option<[i32; 3]>,
