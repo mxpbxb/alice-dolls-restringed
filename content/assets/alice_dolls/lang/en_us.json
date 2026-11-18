@@ -39,8 +39,6 @@
   "item.alice_dolls.item_magnet_bauble.tip": "The doll picks up items from farther away.",
   "item.alice_dolls.mute_bauble": "Mute Bauble",
   "item.alice_dolls.mute_bauble.tip": "The doll keeps quiet in chat.",
-  "item.alice_dolls.wireless_io": "Gap",
-  "item.alice_dolls.wireless_io.tip": "A full doll sends its items to its anchor's chest, from anywhere.",
   "item.alice_dolls.ultramarine_orb_elixir": "Ultramarine Orb Elixir",
   "item.alice_dolls.ultramarine_orb_elixir.tip": "Brings the doll back once at full health, then is used up.",
   "subtitles.alice_dolls.guignol_visit": "The Grand Guignol visits"

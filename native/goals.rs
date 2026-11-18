@@ -886,6 +886,7 @@ fn tick_doll(m: &mut Mob, w: &MobWorld) {
             ai.goals.add(1, Farmer::default());
         }
         Kind::Wakasagi => {
+            ai.goals.add(2, WakasagiHook::default());
             ai.goals.add(5, Fishing::default());
         }
         Kind::GrandGuignol => {
@@ -1128,12 +1129,115 @@ impl Goal for DollReport {
     }
 }
 
+// ---- Grudges: who hurt a doll or its owner, for the dolls to fight back ----
+
+/// Who hurt a doll or its owner: a player, by UUID, or a mob, by entity id.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Foe {
+    Player(u128),
+    Mob(u32),
+}
+
+/// How long a doll remembers who hurt it or its owner.
+const GRUDGE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Who last hurt each doll, and who last hurt each player, and when: the api crate's damage hook says.
+static DOLL_GRUDGES: LazyLock<Mutex<HashMap<u32, (Foe, std::time::Instant)>>> = LazyLock::new(Default::default);
+static OWNER_GRUDGES: LazyLock<Mutex<HashMap<u128, (Foe, std::time::Instant)>>> = LazyLock::new(Default::default);
+
+/// Doll `doll` was hurt by `foe` (never its own owner: the api crate leaves those out).
+pub fn doll_hurt_by(doll: u32, foe: Foe) {
+    if let Ok(mut g) = DOLL_GRUDGES.lock() {
+        g.insert(doll, (foe, std::time::Instant::now()));
+    }
+}
+
+/// The player `owner` was hurt by `foe`: their dolls go after it.
+pub fn owner_hurt_by(owner: u128, foe: Foe) {
+    if let Ok(mut g) = OWNER_GRUDGES.lock() {
+        g.insert(owner, (foe, std::time::Instant::now()));
+    }
+}
+
+/// Who doll `m` holds a grudge against: whoever hurt it, else whoever hurt its owner, in the last
+/// half minute. Never its owner, nor one of its owner's dolls.
+fn grudge(m: &Mob) -> Vec<Foe> {
+    grudges_of(m.id, state(m.id).map_or(0, |s| s.owner))
+}
+
+/// [`grudge`] for doll `id` owned by `owner`.
+pub fn grudges_of(id: u32, owner: u128) -> Vec<Foe> {
+    let fresh = |(f, at): &(Foe, std::time::Instant)| (at.elapsed() < GRUDGE).then_some(*f);
+    let mut out = Vec::new();
+    if let Some(f) = DOLL_GRUDGES.lock().ok().and_then(|g| g.get(&id).and_then(fresh)) {
+        out.push(f);
+    }
+    if owner != 0
+        && let Some(f) = OWNER_GRUDGES.lock().ok().and_then(|g| g.get(&owner).and_then(fresh))
+    {
+        out.push(f);
+    }
+    out.retain(|f| match *f {
+        Foe::Player(p) => p != owner,
+        Foe::Mob(other) => other != id && !spares(id, Who::Mob(other)),
+    });
+    out
+}
+
+/// Whether doll `m` fights back at mob `s`: it has `m` as its target, or hurt `m` or its owner lately.
+fn fights_back(m: &Mob, s: &Seen) -> bool {
+    !is_doll_of_same_owner(m, s)
+        && (matches!(s.target, Some(Who::Mob(id)) if id == m.id) || grudge(m).contains(&Foe::Mob(s.id)))
+}
+
+fn is_doll_of_same_owner(m: &Mob, s: &Seen) -> bool {
+    spares(m.id, Who::Mob(s.id))
+}
+
+/// The player doll `m` goes after, if any: one who hurt it or its owner lately, in its level, not a
+/// spectator, and within the distance it notices things at. Their UUID and where they stand.
+fn player_foe(m: &Mob, w: &MobWorld) -> Option<(u128, OwnerSeen)> {
+    let here_dim = world_dimension(w);
+    let from = here(m);
+    let players = OWNERS.lock().ok()?;
+    grudge(m).into_iter().find_map(|f| {
+        let Foe::Player(p) = f else { return None };
+        let o = players.get(&p).copied()?;
+        let close = (o.position[0] - from[0]).abs() <= SEARCH_RANGE
+            && (o.position[1] - from[1]).abs() <= SEARCH_HEIGHT
+            && (o.position[2] - from[2]).abs() <= SEARCH_RANGE;
+        (o.dimension == here_dim && !o.spectator && close).then_some((p, o))
+    })
+}
+
+/// Blows dolls struck at players since the api crate's last look: doll, player, damage.
+static PLAYER_HITS: Mutex<Vec<(u32, u128, f32)>> = Mutex::new(Vec::new());
+
+pub fn take_player_hits() -> Vec<(u32, u128, f32)> {
+    PLAYER_HITS.lock().map(|mut h| std::mem::take(&mut *h)).unwrap_or_default()
+}
+
+fn hit_player(doll: u32, player: u128, amount: f32) {
+    if let Ok(mut h) = PLAYER_HITS.lock() {
+        h.push((doll, player, amount));
+    }
+}
+
+/// Whether a doll in mode `m` fights at all: on patrol, following, or riding.
+fn fighting_mode(m: &Mob) -> bool {
+    in_mode(m, PATROL) || in_mode(m, FOLLOW) || in_mode(m, RIDE)
+}
+
 /// `EntityDollAIAttackEnemy`, made steadier: on patrol, every hostile mob around it; following,
-/// every hostile mob near its owner as well as whatever is after its owner. It looks again twice a
+/// every hostile mob near its owner as well as whatever is after its owner. In any of those modes it
+/// also fights back at a mob that targets it or hurt it or its owner, and at a player who hurt it or
+/// its owner in the last half minute (players only when no mob is to be fought). It looks again twice a
 /// second, re-paths four times a second, and strikes as often as a stone sword can be swung.
 #[derive(Clone, Debug, Default)]
 struct DollAttack {
     target: Option<u32>,
+    /// A player it goes after, when there is no mob to fight.
+    player: Option<u128>,
     last_scan: i64,
     last_hit: i64,
     last_path: i64,
@@ -1183,23 +1287,28 @@ impl Goal for DollAttack {
         }
         self.last_scan = cx.w.game_time;
         self.target = if in_mode(m, PATROL) {
-            nearest(m, cx, enemy)
+            nearest(m, cx, |s| enemy(s) || fights_back(m, s))
         } else if in_mode(m, FOLLOW) || in_mode(m, RIDE) {
             nearest(m, cx, |s| {
-                matches!(s.target, Some(Who::Player)) || (enemy(s) && near_owner(m, cx, s))
+                matches!(s.target, Some(Who::Player)) || (enemy(s) && near_owner(m, cx, s)) || fights_back(m, s)
             })
         } else {
             None
         };
-        self.target.is_some()
+        self.player = if self.target.is_none() && fighting_mode(m) { player_foe(m, cx.w).map(|(p, _)| p) } else { None };
+        self.target.is_some() || self.player.is_some()
     }
     fn can_continue(&mut self, m: &mut Mob, cx: &mut Cx) -> bool {
+        if let Some(p) = self.player {
+            return fighting_mode(m) && self.lost < LOST_AFTER && player_foe(m, cx.w).is_some_and(|(q, _)| q == p);
+        }
         let Some(s) = self.target.and_then(|id| cx.w.seen(id)) else { return false };
         let keep = if in_mode(m, PATROL) {
             true
         } else if in_mode(m, FOLLOW) || in_mode(m, RIDE) {
-            // A following doll does not chase off: it lets go of anything that leaves its owner.
-            matches!(s.target, Some(Who::Player)) || near_owner(m, cx, s)
+            // A following doll does not chase off: it lets go of anything that leaves its owner,
+            // unless it is fighting back.
+            matches!(s.target, Some(Who::Player)) || near_owner(m, cx, s) || fights_back(m, s)
         } else {
             false
         };
@@ -1211,12 +1320,32 @@ impl Goal for DollAttack {
     }
     fn stop(&mut self, m: &mut Mob, _: &mut Cx) {
         self.target = None;
+        self.player = None;
         m.nav_stop();
     }
     fn every_tick(&self) -> bool {
         true
     }
     fn tick(&mut self, m: &mut Mob, cx: &mut Cx) {
+        if let Some(p) = self.player {
+            let Some((_, o)) = player_foe(m, cx.w).filter(|(q, _)| *q == p) else {
+                self.lost += 1;
+                return;
+            };
+            m.look_at(o.eye);
+            if !in_mode(m, RIDE) && cx.w.game_time - self.last_path >= PATH_EVERY {
+                self.last_path = cx.w.game_time;
+                m.nav_move_to_entity(cx.w, o.position, 0, 1.0);
+            }
+            if in_strike_reach(m, o.position) && cx.w.game_time - self.last_hit >= HIT_EVERY {
+                self.last_hit = cx.w.game_time;
+                m.swing();
+                mark_swing(m.id);
+                hit_player(m.id, p, attack(m.id, ATTACK_STRENGTH));
+                worked(m.id);
+            }
+            return;
+        }
         let Some(id) = self.target else { return };
         let Some((at, eye, alive)) = cx.w.seen(id).map(|s| (pos(s), s.eye_y, s.alive)) else {
             return;
@@ -2517,6 +2646,10 @@ impl Danmaku {
         mark_swing(m.id);
     }
     fn wanted(m: &Mob, cx: &Cx, s: &Seen) -> bool {
+        // A mob that targets it or hurt it or its owner, it shoots back at, wherever it is.
+        if fights_back(m, s) {
+            return true;
+        }
         if !enemy(s) || spares(m.id, Who::Mob(s.id)) {
             return false;
         }
@@ -2816,6 +2949,8 @@ const GOLIATH_REACH_SQR: f64 = 49.0;
 /// blocks off, throwing what it hits back a block.
 #[derive(Clone, Debug, Default)]
 struct GoliathAttack {
+    /// A player it goes after, when there is no mob to fight.
+    player: Option<u128>,
     /// Its blow, when it isn't Goliath's own (`GOLIATH_STRENGTH`).
     strength: f32,
     target: Option<u32>,
@@ -2834,20 +2969,23 @@ impl Goal for GoliathAttack {
         }
         self.last_scan = cx.w.game_time;
         self.target = if in_mode(m, PATROL) {
-            nearest(m, cx, enemy)
+            nearest(m, cx, |s| enemy(s) || fights_back(m, s))
         } else if in_mode(m, FOLLOW) || in_mode(m, RIDE) {
             nearest(m, cx, |s| {
-                !is_doll(s.id) && (matches!(s.target, Some(Who::Player)) || (enemy(s) && near_owner(m, cx, s)))
+                (!is_doll(s.id) && (matches!(s.target, Some(Who::Player)) || (enemy(s) && near_owner(m, cx, s))))
+                    || fights_back(m, s)
             })
         } else {
             None
         };
-        self.target.is_some()
+        self.player = if self.target.is_none() && fighting_mode(m) { player_foe(m, cx.w).map(|(p, _)| p) } else { None };
+        self.target.is_some() || self.player.is_some()
     }
     fn can_continue(&mut self, m: &mut Mob, cx: &mut Cx) -> bool {
-        (in_mode(m, PATROL) || in_mode(m, FOLLOW) || in_mode(m, RIDE))
-            && self.lost < LOST_AFTER
-            && self.target.and_then(|id| cx.w.seen(id)).is_some_and(|s| s.alive)
+        if let Some(p) = self.player {
+            return fighting_mode(m) && self.lost < LOST_AFTER && player_foe(m, cx.w).is_some_and(|(q, _)| q == p);
+        }
+        fighting_mode(m) && self.lost < LOST_AFTER && self.target.and_then(|id| cx.w.seen(id)).is_some_and(|s| s.alive)
     }
     fn start(&mut self, _: &mut Mob, _: &mut Cx) {
         self.counter = 0;
@@ -2855,12 +2993,36 @@ impl Goal for GoliathAttack {
     }
     fn stop(&mut self, m: &mut Mob, _: &mut Cx) {
         self.target = None;
+        self.player = None;
         m.nav_stop();
     }
     fn every_tick(&self) -> bool {
         true
     }
     fn tick(&mut self, m: &mut Mob, cx: &mut Cx) {
+        if let Some(p) = self.player {
+            let Some((_, o)) = player_foe(m, cx.w).filter(|(q, _)| *q == p) else {
+                self.lost += 1;
+                return;
+            };
+            m.look_at(o.eye);
+            self.counter -= 1;
+            if self.counter > 0 {
+                return;
+            }
+            self.counter = 20;
+            if !in_mode(m, RIDE) {
+                m.nav_move_to_entity(cx.w, o.position, 0, 1.0);
+            }
+            if distance_sqr(m, o.position) < GOLIATH_REACH_SQR {
+                m.swing();
+                mark_swing(m.id);
+                hit_player(m.id, p, attack(m.id, if self.strength > 0.0 { self.strength } else { GOLIATH_STRENGTH }));
+                worked(m.id);
+                cx.events.push(MobEvent::Sound("entity.blaze.hurt", o.position, 0.8, 1.0));
+            }
+            return;
+        }
         let Some(id) = self.target else { return };
         let Some((at, eye, alive)) = cx.w.seen(id).map(|s| (pos(s), s.eye_y, s.alive)) else {
             return;
@@ -4598,7 +4760,7 @@ pub fn shield_slot(n: usize) -> usize {
 }
 
 /// Touhou Little Maid's baubles, as this mod's items, and the Totem of Undying.
-pub const BAUBLES: [&str; 12] = [
+pub const BAUBLES: [&str; 11] = [
     "alice_dolls:fire_protect_bauble",
     "alice_dolls:explosion_protect_bauble",
     "alice_dolls:projectile_protect_bauble",
@@ -4608,7 +4770,6 @@ pub const BAUBLES: [&str; 12] = [
     "alice_dolls:nimble_fabric",
     "alice_dolls:item_magnet_bauble",
     "alice_dolls:mute_bauble",
-    "alice_dolls:wireless_io",
     "alice_dolls:ultramarine_orb_elixir",
     "minecraft:totem_of_undying",
 ];
@@ -5116,6 +5277,89 @@ impl Goal for Fishing {
     fn name(&self) -> &'static str {
         "Fishing"
     }
+}
+
+/// How far Wakasagi casts at an enemy, and how often: her line reaches sixteen blocks, and she casts
+/// again once a second and a half has passed since she reeled the last one in.
+const HOOK_RANGE_SQR: f64 = 16.0 * 16.0;
+const HOOK_EVERY: i64 = 30;
+/// Ticks from her cast to her reel: the bobber's flight.
+const HOOK_FLIGHT: i32 = 8;
+
+/// Wakasagi, following her owner, hooks enemies with her line and reels them in to her, as a
+/// fishing rod pulls a hooked mob (`FishingHook.pullEntity`: its velocity gains a tenth of the way
+/// from it to her). What she hooks is what a following doll fights: whatever is after her owner,
+/// and hostile mobs near them. She needs no rod for it, and it wears none.
+#[derive(Clone, Debug, Default)]
+struct WakasagiHook {
+    target: Option<u32>,
+    last_scan: i64,
+    last_reel: i64,
+    flight: i32,
+}
+
+impl Goal for WakasagiHook {
+    fn flags(&self) -> u8 {
+        goals::LOOK
+    }
+    fn can_use(&mut self, m: &mut Mob, cx: &mut Cx) -> bool {
+        if !in_mode(m, FOLLOW) || cx.w.game_time - self.last_scan < SCAN_EVERY || cx.w.game_time - self.last_reel < HOOK_EVERY {
+            return false;
+        }
+        self.last_scan = cx.w.game_time;
+        self.target = nearest(m, cx, |s| {
+            (matches!(s.target, Some(Who::Player)) || (enemy(s) && near_owner(m, cx, s))) && !is_doll(s.id)
+        })
+        .filter(|&id| cx.w.seen(id).is_some_and(|s| distance_sqr(m, pos(s)) <= HOOK_RANGE_SQR) && m.sees(cx.w, Who::Mob(id)));
+        self.target.is_some()
+    }
+    fn can_continue(&mut self, m: &mut Mob, cx: &mut Cx) -> bool {
+        in_mode(m, FOLLOW) && self.flight > 0 && self.target.and_then(|id| cx.w.seen(id)).is_some_and(|s| s.alive)
+    }
+    fn start(&mut self, m: &mut Mob, cx: &mut Cx) {
+        self.flight = HOOK_FLIGHT;
+        cx.events.push(MobEvent::Sound("entity.fishing_bobber.throw", here(m), 0.5, 0.6));
+        m.swing();
+        mark_swing(m.id);
+    }
+    fn stop(&mut self, _: &mut Mob, _: &mut Cx) {
+        self.target = None;
+        self.flight = 0;
+    }
+    fn every_tick(&self) -> bool {
+        true
+    }
+    fn tick(&mut self, m: &mut Mob, cx: &mut Cx) {
+        let Some(id) = self.target else { return };
+        let Some((at, eye)) = cx.w.seen(id).map(|s| (pos(s), s.eye_y)) else { return };
+        m.look_at([at[0], eye, at[2]]);
+        self.flight -= 1;
+        if self.flight > 0 {
+            return;
+        }
+        // Reeled in: pulled a tenth of the way to her, and up a little, so it clears the ground.
+        let me = here(m);
+        let pull = hook_pull(me, at);
+        cx.events.push(MobEvent::Push { target: Who::Mob(id), velocity: pull });
+        cx.events.push(MobEvent::Sound("entity.fishing_bobber.retrieve", me, 0.6, 1.0));
+        cx.events.push(MobEvent::ParticleAt { kind: "splash", at: [at[0], eye, at[2]], velocity: [0.0, 0.2, 0.0] });
+        m.swing();
+        mark_swing(m.id);
+        worked(m.id);
+        self.last_reel = cx.w.game_time;
+    }
+    fn box_clone(&self) -> Box<dyn Goal> {
+        Box::new(self.clone())
+    }
+    fn name(&self) -> &'static str {
+        "WakasagiHook"
+    }
+}
+
+/// `FishingHook.pullEntity`'s pull on a mob at `at` hooked by a line from `from`: a tenth of the way
+/// between them, with a little lift so a mob on the ground is not dragged into it.
+pub fn hook_pull(from: [f64; 3], at: [f64; 3]) -> [f64; 3] {
+    [(from[0] - at[0]) * 0.1, (from[1] - at[1]) * 0.1 + 0.2, (from[2] - at[2]) * 0.1]
 }
 
 // ---- Aya's photos ----

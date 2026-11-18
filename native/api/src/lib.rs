@@ -25,7 +25,7 @@ use horizon_client::mod_api::{
     CameraPoseEvent, HudMode, RenderNameTagEvent,
     AttachmentCodec, AttachmentError, AttachmentType, AttackEntityEvent, Compound,
     EntityTickListenedEvent, EntityTickPostEvent, Flow, Holder, Hooks, Host, InteractEntityEvent,
-    ItemStack, LivingIncomingDamageEvent, LootDropsEvent, PlayerRespawnedEvent, MenuClickedEvent, MenuClosedEvent, MenuInputClosedEvent,
+    ItemStack, LivingIncomingDamageEvent, LivingIncomingDamageV2Event, LootDropsEvent, PlayerRespawnedEvent, MenuClickedEvent, MenuClosedEvent, MenuInputClosedEvent,
     ScreenRenderPostEvent, ScreenMouseScrolledPreEvent, RightClickBlockEvent,
     MobSubmitEvent, NativeServerPlayer, PlaceBlockEvent, StackData, Tag, Text, TooltipEvent,
     UseItemEvent, UseItemOnEvent, WorldSubmitEvent, Direction, EquipmentSlot, LivingDeathEvent, NativeEffect, ClientTickPostEvent,
@@ -1478,7 +1478,7 @@ fn kept_slot(n: usize, i: usize, item: &str) -> bool {
 
 impl Mod {
     /// Once a second for each doll: which anchor it keeps to, and emptying itself into the chest
-    /// there when it is close, or from anywhere when it wears the Gap and is full.
+    /// there when it is close.
     fn anchor_work(&self, host: &mut dyn Host, id: u32, data: &mut DollData) {
         let Some(entity) = host.entity(id) else { return };
         let (Some(at), Some(level)) = (host.entity_position(entity), host.entity_level(entity)) else { return };
@@ -1505,9 +1505,7 @@ impl Mod {
         let Some(anchor) = anchor else { return };
         let mut items = goals::inventory(id).unwrap_or_else(|| data.items.clone());
         let n = items.len();
-        let full = items.iter().enumerate().all(|(i, s)| s.is_some() || kept_slot(n, i, ""));
-        let gap = goals::wears(id, "alice_dolls:wireless_io") && full;
-        if !(patrol && d2(anchor) <= DEPOSIT_RANGE_SQR) && !gap {
+        if !(patrol && d2(anchor) <= DEPOSIT_RANGE_SQR) {
             return;
         }
         if goals::chest_open() == Some(id) {
@@ -1545,7 +1543,7 @@ impl Mod {
         if moved == 0 {
             return;
         }
-        say(host, id, data, 3, if gap { "Sent my things home through the Gap" } else { "Put my things in the chest" });
+        say(host, id, data, 3, "Put my things in the chest");
         goals::put_inventory(id, items.clone());
         data.items = items;
         if let Some(doll) = doll_of(host, id) {
@@ -3041,6 +3039,14 @@ impl Hooks for Mod {
             last.extend(players.iter().map(|p| (p.uuid, p.position)));
             goals::set_owners(seen);
         }
+        // The blows dolls struck at players who hurt them or their owner: the doll is the attacker.
+        for (doll, foe, amount) in goals::take_player_hits() {
+            if let Some(p) = players.iter().find(|p| p.uuid == foe) {
+                if let Ok(target) = u32::try_from(p.entity_id) {
+                    host.hurt_entity(&p.dimension, target, amount, "minecraft:mob_attack", Some(doll));
+                }
+            }
+        }
         let bells: Vec<u128> = PENDING_BELL.lock().map(|mut p| std::mem::take(&mut *p)).unwrap_or_default();
         for player in bells {
             self.open_bell(host, player);
@@ -3451,6 +3457,39 @@ impl Hooks for Mod {
     }
 
     /// Ooedo walks away from its own blasts, and from everyone else's.
+    /// Who hurt a doll, or a player: the dolls remember it for half a minute and fight back (a doll
+    /// at a mob, or at a player who hurt it or its owner). A doll's own owner is never its foe.
+    fn living_incoming_damage_v2(&self, host: &mut dyn Host, event: &mut LivingIncomingDamageV2Event<'_>) -> Flow {
+        let (Ok(victim), Ok(attacker)) = (u32::try_from(event.entity), u32::try_from(event.causing)) else {
+            return Flow::Continue;
+        };
+        if victim == attacker || event.amount <= 0.0 {
+            return Flow::Continue;
+        }
+        let players = host.server_players();
+        let player_of = |id: u32| players.iter().find(|p| u32::try_from(p.entity_id).ok() == Some(id)).map(|p| p.uuid);
+        // One doll hurting another, or a player, is no grudge: dolls don't fall out among themselves.
+        if known(attacker).is_some() {
+            return Flow::Continue;
+        }
+        let foe = match player_of(attacker) {
+            Some(uuid) => goals::Foe::Player(uuid),
+            None => goals::Foe::Mob(attacker),
+        };
+        if event.kind == KIND
+            && let Some(k) = known(victim)
+        {
+            if foe != goals::Foe::Player(k.owner) {
+                goals::doll_hurt_by(victim, foe);
+            }
+        } else if event.kind == "minecraft:player"
+            && let Some(owner) = player_of(victim)
+        {
+            goals::owner_hurt_by(owner, foe);
+        }
+        Flow::Continue
+    }
+
     fn living_incoming_damage(&self, event: &mut LivingIncomingDamageEvent<'_>) -> Flow {
         // No doll suffocates: one on its owner's head in a low tunnel, or digging, is inside a block.
         if event.kind == KIND
@@ -3949,6 +3988,31 @@ mod tests {
         // Fortune III: a roll of 0 to 4, at least one, at most four.
         let counts: Vec<u32> = (0..5).map(goals::fortune_count).collect();
         assert_eq!(counts, [1, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn wakasagis_hook_pulls_a_tenth_of_the_way_and_lifts() {
+        let p = goals::hook_pull([0.0, 64.0, 0.0], [10.0, 64.0, -5.0]);
+        assert!((p[0] + 1.0).abs() < 1e-9 && (p[2] - 0.5).abs() < 1e-9);
+        assert!((p[1] - 0.2).abs() < 1e-9);
+    }
+
+    #[test]
+    fn grudges_are_kept_and_shared_with_the_owners_dolls() {
+        goals::doll_hurt_by(90_001, goals::Foe::Player(7));
+        goals::owner_hurt_by(8, goals::Foe::Mob(90_002));
+        assert!(goals::grudges_of(90_001, 0).contains(&goals::Foe::Player(7)));
+        // A doll whose owner (8) was hurt by a mob holds that against it too.
+        assert!(goals::grudges_of(90_003, 8).contains(&goals::Foe::Mob(90_002)));
+        // Its own owner is never its foe.
+        goals::doll_hurt_by(90_004, goals::Foe::Player(9));
+        assert!(!goals::grudges_of(90_004, 9).contains(&goals::Foe::Player(9)));
+    }
+
+    #[test]
+    fn the_gap_is_no_bauble_any_more() {
+        assert!(!goals::is_bauble("alice_dolls:wireless_io"));
+        assert!(goals::is_bauble("minecraft:totem_of_undying"));
     }
 
     #[test]
