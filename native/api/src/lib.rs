@@ -1858,7 +1858,7 @@ impl Mod {
             return Flow::Cancel;
         }
         // Patchouli's other mode, and back to standby.
-        if sneaking && held == Some("minecraft:book") && name == goals::PATCHOULI {
+        if sneaking && held == Some("minecraft:ink_sac") && name == goals::PATCHOULI {
             data.mode = if data.mode == goals::SNIPE { goals::STANDBY } else { goals::SNIPE };
             data.enabled = true;
             say(host, id, &data, 1, mode_name(data.mode));

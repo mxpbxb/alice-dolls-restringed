@@ -245,6 +245,8 @@ pub struct Model {
     pub leg_angle: f32,
     /// How big the held item is drawn.
     pub item_scale: f32,
+    /// How big the whole doll is drawn, from her feet.
+    pub scale: f32,
 }
 
 /// How a doll is drawn.
@@ -315,6 +317,7 @@ pub static MARISA: Model = Model {
     ],
     leg_angle: 1.4,
     item_scale: 0.8,
+    scale: 1.0,
 };
 
 pub static REIMU: Model = Model {
@@ -336,6 +339,7 @@ pub static REIMU: Model = Model {
     ],
     leg_angle: 1.4,
     item_scale: 0.8,
+    scale: 1.0,
 };
 
 pub static AYA: Model = Model {
@@ -355,6 +359,7 @@ pub static AYA: Model = Model {
     ],
     leg_angle: 1.4,
     item_scale: 0.8,
+    scale: 1.0,
 };
 
 /// A mermaid: a tail, no legs.
@@ -378,6 +383,7 @@ pub static WAKASAGI: Model = Model {
     ],
     leg_angle: 1.4,
     item_scale: 0.8,
+    scale: 1.0,
 };
 
 /// Yuuka (`GRANDE`): a little taller, the head lower on the shoulders.
@@ -398,6 +404,7 @@ pub static YUUKA: Model = Model {
     ],
     leg_angle: 1.4,
     item_scale: 0.8,
+    scale: 1.0,
 };
 
 /// Goliath (`VENTI`): nearly three blocks tall, on a 128x128 texture.
@@ -428,6 +435,7 @@ pub static GOLIATH: Model = Model {
     ],
     leg_angle: 0.7,
     item_scale: 1.5,
+    scale: 1.0,
 };
 
 // Yukari, Patchouli and Alice: mxpbxb's Blockbench models, by `bb_to_rust.py`.
@@ -459,6 +467,8 @@ pub static YUKARI: Model = Model {
     ],
     leg_angle: 1.4,
     item_scale: 0.8,
+    // A quarter taller than the other dolls.
+    scale: 1.25,
 };
 
 pub static PATCHOULI: Model = Model {
@@ -485,6 +495,7 @@ pub static PATCHOULI: Model = Model {
     ],
     leg_angle: 1.4,
     item_scale: 0.8,
+    scale: 1.0,
 };
 
 pub static ALICE: Model = Model {
@@ -504,6 +515,7 @@ pub static ALICE: Model = Model {
     ],
     leg_angle: 1.4,
     item_scale: 0.8,
+    scale: 1.0,
 };
 
 /// Turns what follows about `pivot` the way a `ModelRenderer` does (z, then y, then x), given in the
@@ -561,6 +573,9 @@ pub fn draw_model(
     };
 
     draw.push();
+    if model.scale != 1.0 {
+        draw.scale([model.scale; 3]);
+    }
     if mob.death_time > 0 {
         let tipped = ((mob.death_time as f32 + mob.partial - 1.0) / 20.0 * 1.6).sqrt().min(1.0);
         draw.rotate_about([0.0, 0.0, 1.0], tipped * 90.0, [0.0, 0.0, 0.0]);

@@ -965,10 +965,8 @@ fn tick_doll(m: &mut Mob, w: &MobWorld) {
         Kind::GrandGuignol => {
             ai.goals.add(-10, Mission);
         }
-        // Yukari strikes as Shanghai does, following her owner (her one mode) as their portable gap.
-        Kind::Yukari => {
-            ai.goals.add(2, DollAttack::default());
-        }
+        // Yukari follows her owner (her one mode) as their portable gap, and leaves mobs alone.
+        Kind::Yukari => {}
         // Patchouli snipes: one slow, heavy orb at a time, from far off.
         Kind::Patchouli => {
             ai.goals.add(1, Snipe::default());
@@ -977,8 +975,10 @@ fn tick_doll(m: &mut Mob, w: &MobWorld) {
         Kind::Alice => {}
     }
     let idle = kind == Kind::Alice;
+    // Alice and Yukari attack nothing at all.
+    let peaceful = idle || kind == Kind::Yukari;
     // The dolls that don't fight still stand up for a badly hurt doll near them.
-    if !fights(kind) && !idle {
+    if !fights(kind) && !peaceful {
         ai.goals.add(0, DollAttack { defend_only: true, ..DollAttack::default() });
     }
     if kind != Kind::Russia && !idle {
@@ -987,7 +987,7 @@ fn tick_doll(m: &mut Mob, w: &MobWorld) {
     ai.goals.add(4, MoscowFollow { recalculate_in: 0 });
     ai.goals.add(1, AnchorLeash { recalculate_in: 0, walked: 0 });
     ai.goals.add(12, AnchorHome { recalculate_in: 0, walked: 0 });
-    if !idle {
+    if !peaceful {
         ai.goals.add(0, FoxHunt::default());
     }
     ai.goals.add(12, DollFollow { recalculate_in: 0 });
@@ -1363,7 +1363,7 @@ fn attacker_elsewhere(m: &Mob, cx: &Cx, target: Option<u32>) -> bool {
 fn fights(kind: Kind) -> bool {
     matches!(
         kind,
-        Kind::Shanghai | Kind::Marisa | Kind::Reimu | Kind::Aya | Kind::Goliath | Kind::NetheriteGoliath | Kind::Yukari | Kind::Patchouli
+        Kind::Shanghai | Kind::Marisa | Kind::Reimu | Kind::Aya | Kind::Goliath | Kind::NetheriteGoliath | Kind::Patchouli
     )
 }
 
