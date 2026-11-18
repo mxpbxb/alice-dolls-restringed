@@ -5020,11 +5020,12 @@ impl Goal for MoscowFollow {
     fn flags(&self) -> u8 {
         goals::MOVE | goals::LOOK
     }
+    // A dropped item to fetch (round her or the doll she follows) comes first.
     fn can_use(&mut self, m: &mut Mob, cx: &mut Cx) -> bool {
-        Self::doll(m, cx).is_some_and(|at| distance_sqr(m, at) >= 9.0)
+        item_target(m.id).is_none() && Self::doll(m, cx).is_some_and(|at| distance_sqr(m, at) >= 9.0)
     }
     fn can_continue(&mut self, m: &mut Mob, cx: &mut Cx) -> bool {
-        Self::doll(m, cx).is_some_and(|at| distance_sqr(m, at) > 2.25)
+        item_target(m.id).is_none() && Self::doll(m, cx).is_some_and(|at| distance_sqr(m, at) > 2.25)
     }
     fn start(&mut self, _: &mut Mob, _: &mut Cx) {
         self.recalculate_in = 0;

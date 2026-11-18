@@ -2302,48 +2302,76 @@ impl Mod {
         host.action_bar(player.uuid, Text::literal(text));
     }
 
-    /// A Moscow doll empties the doll she is bound to when it is full, into her own stacks of 128:
-    /// all but what it wears (a Goliath's armour) and its torches.
-    fn take_from_bound(&self, host: &mut dyn Host, id: u32, data: &mut DollData) {
-        let Some(target) = UUIDS.lock().ok().and_then(|u| u.get(&data.bound).copied()) else { return };
-        if goals::chest_open() == Some(id) || goals::chest_open() == Some(target) {
+    /// Russia and Moscow pull what their owner's other dolls within 10 blocks carry into their own
+    /// inventory (Moscow's stacks of 128), once a second: all but what those dolls keep when they
+    /// empty themselves into a chest (armour, shield, torches, their first stack of food) and any
+    /// doll they carry.
+    fn pull_from_dolls(&self, host: &mut dyn Host, id: u32, data: &mut DollData, moscow: bool) {
+        if goals::chest_open() == Some(id) {
             return;
         }
-        let (Some(a), Some(b)) = (
-            host.entity(id).and_then(|e| host.entity_position(e)),
-            host.entity(target).and_then(|e| host.entity_position(e)),
-        ) else {
-            return;
-        };
-        if (a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2) > 64.0 {
-            return;
-        }
-        let Some(mut theirs) = goals::inventory(target) else { return };
-        if theirs.iter().any(Option::is_none) {
-            return;
-        }
+        let Some(e) = host.entity(id) else { return };
+        let (Some(a), Some(level)) = (host.entity_position(e), host.entity_level(e)) else { return };
+        let dimension = level.dimension().to_owned();
+        let others: Vec<u32> = KNOWN
+            .lock()
+            .map(|k| {
+                k.iter()
+                    .filter(|(o, k)| **o != id && k.owner == data.owner && k.doll.name != goals::RUSSIA && k.doll.name != goals::MOSCOW)
+                    .map(|(o, _)| *o)
+                    .collect()
+            })
+            .unwrap_or_default();
         let mut mine = goals::inventory(id).unwrap_or_else(|| data.items.clone());
         let mut moved = 0;
-        for slot in theirs.iter_mut() {
-            let Some(s) = slot.as_mut() else { continue };
-            if goals::armour_part(&s.item).is_some() || matches!(&*s.item, "minecraft:torch" | "minecraft:shield") {
+        for target in others {
+            if goals::chest_open() == Some(target) {
                 continue;
             }
-            let left = store_some(&mut mine, s, MOSCOW_STACK);
-            if left < s.count {
-                moved += 1;
-                s.count = left;
-                if left == 0 {
-                    *slot = None;
+            let Some(t) = host.entity(target) else { continue };
+            if !host.entity_level(t).is_some_and(|l| l.dimension() == dimension) {
+                continue;
+            }
+            let Some(b) = host.entity_position(t) else { continue };
+            if (0..3).map(|i| (a[i] - b[i]).powi(2)).sum::<f64>() > PULL_RANGE * PULL_RANGE {
+                continue;
+            }
+            let Some(mut theirs) = goals::inventory(target) else { continue };
+            let n = theirs.len();
+            let mut kept_food = false;
+            let mut took = false;
+            for (i, slot) in theirs.iter_mut().enumerate() {
+                let Some(s) = slot.as_mut() else { continue };
+                let first_food = !kept_food && goals::food_heal(&s.item).is_some();
+                kept_food |= first_food;
+                let kept = first_food
+                    || kept_slot(n, i, &s.item)
+                    || goals::armour_part(&s.item).is_some()
+                    || &*s.item == "minecraft:shield"
+                    || goals::is_doll_item(&s.item);
+                if kept {
+                    continue;
                 }
+                let max = if moscow { MOSCOW_STACK } else { host.max_stack_size(&s.item).unwrap_or(64) };
+                let left = store_some(&mut mine, s, max);
+                if left < s.count {
+                    moved += 1;
+                    took = true;
+                    s.count = left;
+                    if left == 0 {
+                        *slot = None;
+                    }
+                }
+            }
+            if took {
+                goals::put_inventory(target, theirs.clone());
+                self.store_items(host, target, theirs, false);
             }
         }
         if moved == 0 {
             return;
         }
-        say(host, id, data, 2, &format!("Took {moved} stacks off it"));
-        goals::put_inventory(target, theirs.clone());
-        self.store_items(host, target, theirs, false);
+        say(host, id, data, 2, &format!("Took {moved} stacks from the dolls"));
         goals::put_inventory(id, mine.clone());
         data.items = mine;
     }
@@ -2535,6 +2563,10 @@ impl Mod {
 
 /// `canCollectRange`: Russia takes an item within two blocks.
 const COLLECT_RANGE_SQR: f64 = 4.0;
+/// How far round the doll it follows a storage doll (Russia, Moscow) goes for dropped items.
+const FOLLOWED_ITEM_RANGE: f64 = 20.0;
+/// How far a storage doll pulls items from its owner's other dolls.
+const PULL_RANGE: f64 = 10.0;
 
 /// How many of its own ticks pass between Russia's looks for dropped items.
 static COLLECT_TICKS: LazyLock<Mutex<HashMap<u32, u32>>> = LazyLock::new(Default::default);
@@ -2542,7 +2574,7 @@ static COLLECT_TICKS: LazyLock<Mutex<HashMap<u32, u32>>> = LazyLock::new(Default
 /// `EntityDollAICollectItem`, the part a mob's goals cannot do: finds the nearest dropped item Russia
 /// has room for, for its goal to walk to, and takes whatever is within reach into its inventory.
 /// The stacks it took come back as a count.
-fn collect(host: &mut dyn Host, id: u32, moscow: bool) -> u32 {
+fn collect(host: &mut dyn Host, id: u32, moscow: bool, around: Option<[f64; 3]>) -> u32 {
     let due = COLLECT_TICKS.lock().is_ok_and(|mut ticks| {
         let n = ticks.entry(id).or_default();
         *n = (*n + 1) % 5;
@@ -2556,11 +2588,21 @@ fn collect(host: &mut dyn Host, id: u32, moscow: bool) -> u32 {
         return 0;
     };
     let dimension = level.dimension();
-    let found = host.item_entities(
+    let mut found = host.item_entities(
         dimension,
         [at[0] - 16.0, at[1] - 8.0, at[2] - 16.0],
         [at[0] + 16.0, at[1] + 8.0, at[2] + 16.0],
     );
+    // A storage doll also goes for what lies within 20 blocks of the doll it follows.
+    if let Some(c) = around {
+        let r = FOLLOWED_ITEM_RANGE;
+        for item in host.item_entities(dimension, [c[0] - r, c[1] - r, c[2] - r], [c[0] + r, c[1] + r, c[2] + r]) {
+            let d2: f64 = (0..3).map(|i| (item.position[i] - c[i]).powi(2)).sum();
+            if d2 <= r * r && !found.iter().any(|f| f.id == item.id) {
+                found.push(item);
+            }
+        }
+    }
     let holder = Holder::Entity(id);
     let mut data = DOLL.get(host, holder).unwrap_or_default();
     // While its owner has it open, what Russia carries is the chest screen's.
@@ -3602,7 +3644,19 @@ impl Hooks for Mod {
         }
         // Every doll at work picks up what is dropped around it.
         if data.enabled && matches!(data.mode, goals::PATROL | goals::FOLLOW | goals::SECRET | goals::SECRET_ALL | goals::GIGA | goals::BLOOM) {
-            let picked = collect(host, id, moscow);
+            // Russia and Moscow: round the doll they follow too, when it is here.
+            let around = if moscow || russia {
+                UUIDS
+                    .lock()
+                    .ok()
+                    .and_then(|u| u.get(&data.bound).copied())
+                    .and_then(|b| host.entity(b))
+                    .filter(|&b| host.entity_level(b).map(|l| l.dimension().to_owned()) == host.entity(id).and_then(|e| host.entity_level(e)).map(|l| l.dimension().to_owned()))
+                    .and_then(|b| host.entity_position(b))
+            } else {
+                None
+            };
+            let picked = collect(host, id, moscow, around);
             if picked > 0 {
                 // What it picked up is in its saved data now.
                 data = DOLL.get(host, holder).unwrap_or(data);
@@ -3614,7 +3668,7 @@ impl Hooks for Mod {
         } else {
             goals::set_item_target(id, None);
         }
-        if moscow {
+        if moscow || russia {
             let to = (data.bound != 0).then(|| UUIDS.lock().ok().and_then(|u| u.get(&data.bound).copied())).flatten();
             goals::set_bound(id, to);
             let due = MOSCOW_TICKS.lock().is_ok_and(|mut t| {
@@ -3622,8 +3676,8 @@ impl Hooks for Mod {
                 *n = (*n + 1) % 20;
                 *n == 0
             });
-            if due && to.is_some() && data.enabled && data.mode != goals::STANDBY {
-                self.take_from_bound(host, id, &mut data);
+            if due && data.enabled && data.mode != goals::STANDBY {
+                self.pull_from_dolls(host, id, &mut data, moscow);
                 if let Some(doll) = doll_of(host, id) {
                     remember(id, doll, &data);
                 }
