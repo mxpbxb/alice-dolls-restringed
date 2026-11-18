@@ -65,7 +65,7 @@ eats until it is whole again earns nothing. Point and power items (dropped by
 [Touhou Mobs](https://github.com/mxpbxb/touhou-mobs), from
 [Touhou Items](https://github.com/mxpbxb/touhou-items)) earn love too: right-click to give the stack,
 sneak-click to give one. A Max Doll Point is worth four Point items. Points a doll carries in its
-inventory it takes for itself. Russia and Moscow earn 3 love for each stack they pick up, and 3
+inventory it takes for itself. Russia and Moscow move twice as fast as other dolls. They earn 3 love for each stack they pick up, and 3
 for each quarter hour they follow the doll they are bound to.
 Each level takes three quarters more than the last, and gives 3 more attack and 5 more health, each
 then 10% more, and makes the working dolls faster and stronger: mining, blasting, farming and fishing.
