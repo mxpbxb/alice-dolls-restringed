@@ -19,7 +19,7 @@ Each recipe is the item in the top left, wool (Goliath: iron blocks), and a Doll
 | Doll | Crafted with | What it does |
 |---|---|---|
 | Shanghai | golden sword | Fights hostile mobs, shears sheep, reports the mobs around it. Evolves into Goliath |
-| Horai | golden pickaxe | Finds ore (ancient debris too) and digs to it. Evolves into Diamond, then Netherite Horai, which earns no love for digging, only 5 for each quarry finished, and waits four seconds before heading off to its quarry so you can give it another order. Sneak and right-click any Horai with a golden pickaxe for the giga quarry: a 20x20 pit round where she stands, dug layer by layer down to bedrock |
+| Horai | golden pickaxe | Finds ore (ancient debris too) and digs to it. Evolves into Diamond, then Netherite Horai, which earns no love for digging, only 5 for each quarry finished, a whole level for each giga quarry, and 10 for each diamond she digs out of either, and waits four seconds before heading off to its quarry so you can give it another order. Sneak and right-click any Horai with a golden pickaxe for the giga quarry: a 20x20 pit round where she stands, dug layer by layer down to bedrock |
 | Ooedo | TNT | Walks up to hostile mobs and explodes; no explosion hurts it |
 | Germany | golden axe | Finds trees and chops them down |
 | London | eye of ender | Reports the spawners above and below it |

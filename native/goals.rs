@@ -308,18 +308,38 @@ pub fn take_worked() -> Vec<u32> {
     WORKED.lock().map(|mut w| std::mem::take(&mut *w)).unwrap_or_default()
 }
 
-/// The dolls that have just dug a quarry down to bedrock, for the api crate to give love to.
-static QUARRIED: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+/// The dolls that have just dug a quarry down to bedrock, for the api crate to give love to, and
+/// whether it was a giga quarry.
+static QUARRIED: Mutex<Vec<(u32, bool)>> = Mutex::new(Vec::new());
 
-fn quarried(id: u32) {
+fn quarried(id: u32, giga: bool) {
     if let Ok(mut q) = QUARRIED.lock() {
-        q.push(id);
+        q.push((id, giga));
     }
 }
 
-/// The dolls that finished a quarry since the last call, once for each.
-pub fn take_quarried() -> Vec<u32> {
+/// The dolls that finished a quarry since the last call, once for each, and whether it was a giga one.
+pub fn take_quarried() -> Vec<(u32, bool)> {
     QUARRIED.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default()
+}
+
+/// The dolls that have just dug out a prize: a diamond in a Netherite Horai's quarry, or a diamond
+/// or ancient debris on the ore hunt. Once for each.
+static PRIZES: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+
+fn prize(id: u32) {
+    if let Ok(mut p) = PRIZES.lock() {
+        p.push(id);
+    }
+}
+
+/// The prizes dug since the last call, one entry for each.
+pub fn take_prizes() -> Vec<u32> {
+    PRIZES.lock().map(|mut p| std::mem::take(&mut *p)).unwrap_or_default()
+}
+
+fn is_diamond(name: &str) -> bool {
+    matches!(short(name), "diamond_ore" | "deepslate_diamond_ore")
 }
 
 /// The dolls that do nothing yet (Alice): never a rescuer either.
@@ -4613,6 +4633,9 @@ impl Quarry {
         self.hold(m);
         if self.dig.at.is_some() {
             if let Some(p) = self.dig.tick(m, cx) {
+                if is_diamond(&name_at(cx.w, p)) {
+                    prize(m.id);
+                }
                 break_out(m, cx, p, centre(p), keep_rock(m.id));
                 self.look_for_vein(cx.w, p);
                 // Into the ore's place, to reach the next of its vein.
@@ -4664,7 +4687,7 @@ impl Quarry {
             || layer_cells(site, next).iter().any(|&p| &*name_at(cx.w, p) == "minecraft:bedrock");
         if bedrock {
             say(m.id, 1, "Bedrock! Coming back");
-            quarried(m.id);
+            quarried(m.id, false);
             self.finish(m, cx);
             return;
         }
@@ -4799,6 +4822,9 @@ impl GigaQuarry {
         if let Some(p) = self.dig.at {
             hold_in(m, [f64::from(p[0]) + 0.5, f64::from(layer + 1), f64::from(p[2]) + 0.5]);
             if let Some(p) = self.dig.tick(m, cx) {
+                if horai_tier(m) == 2 && is_diamond(&name_at(cx.w, p)) {
+                    prize(m.id);
+                }
                 break_out(m, cx, p, centre(p), keep_rock(m.id));
             }
             return;
@@ -4822,7 +4848,7 @@ impl GigaQuarry {
         if next < WORLD_BOTTOM || self.hard * 2 >= (GIGA_SIZE * GIGA_SIZE) as usize {
             self.done = true;
             say(m.id, 1, "Giga quarry done: bedrock!");
-            quarried(m.id);
+            quarried(m.id, true);
             return;
         }
         self.layer = Some(next);
@@ -4938,6 +4964,9 @@ impl Goal for SeekOre {
             if let Some(p) = self.dig.tick(m, cx) {
                 let name = name_at(cx.w, p);
                 if seeks(m, &name) {
+                    if is_treasure(&name) {
+                        prize(m.id);
+                    }
                     break_out(m, cx, p, centre(p), keep_rock(m.id));
                     say(m.id, 1, format!("Got {}!", short(&name)));
                 } else {

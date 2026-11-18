@@ -1404,6 +1404,8 @@ fn beams_shown() -> Vec<([f64; 3], [f64; 3])> {
 const WORK_FAVOUR: u32 = 10;
 /// What a Netherite Horai earns, and all she earns by her work: five for each quarry dug to bedrock.
 const QUARRY_FAVOUR: u32 = 5;
+/// What a Diamond or Netherite Horai earns for each diamond (or ancient debris) she digs out.
+const PRIZE_FAVOUR: u32 = 10;
 
 /// The highest Speed amplifier riding Ayas give (Speed X).
 const AYA_SPEED_MAX: u8 = 9;
@@ -3417,10 +3419,20 @@ impl Hooks for Mod {
         // Every twenty jobs a doll does, it likes its owner a little more; a Netherite Horai only
         // for each quarry she finishes.
         let netherite = |id: u32| known(id).is_some_and(|k| k.doll.name == goals::NETHERITE_HORAI);
-        for (worker, favour) in goals::take_quarried().into_iter().filter(|&id| netherite(id)).map(|id| (id, QUARRY_FAVOUR)) {
+        // A giga quarry is worth a whole level to her: the points her level takes.
+        let quarried = goals::take_quarried().into_iter().filter(|&(id, _)| netherite(id)).map(|(id, giga)| (id, giga, false));
+        let prizes = goals::take_prizes().into_iter().map(|id| (id, false, true));
+        for (worker, giga, prize) in quarried.chain(prizes) {
             let holder = Holder::Entity(worker);
             if DOLL.has(host, holder).unwrap_or(false) {
                 let mut data = DOLL.get(host, holder).unwrap_or_default();
+                let favour = if prize {
+                    PRIZE_FAVOUR
+                } else if giga {
+                    favour_level(data.favour).2
+                } else {
+                    QUARRY_FAVOUR
+                };
                 self.add_favour(host, worker, &mut data, favour);
                 let _ = DOLL.set(host, holder, data);
             }
