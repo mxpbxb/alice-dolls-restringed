@@ -88,8 +88,8 @@ fn speed_factor(kind: Kind) -> f64 {
         Kind::Wakasagi => 0.22 / 0.28,
         // The Netherite Goliath is a quarter quicker on its feet.
         Kind::NetheriteGoliath => 1.25,
-        // Russia and Moscow run twice as fast to wherever they are going.
-        Kind::Russia | Kind::Moscow => 2.0,
+        // Russia and Moscow (one kind) run twice as fast to wherever they are going.
+        Kind::Russia => 2.0,
         _ => 1.0,
     }
 }
