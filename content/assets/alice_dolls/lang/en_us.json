@@ -41,5 +41,8 @@
   "item.alice_dolls.mute_bauble.tip": "The doll keeps quiet in chat.",
   "item.alice_dolls.ultramarine_orb_elixir": "Ultramarine Orb Elixir",
   "item.alice_dolls.ultramarine_orb_elixir.tip": "Brings the doll back once at full health, then is used up.",
-  "subtitles.alice_dolls.guignol_visit": "The Grand Guignol visits"
+  "subtitles.alice_dolls.guignol_visit": "The Grand Guignol visits",
+  "item.alice_dolls.yukari_doll": "Yukari Doll",
+  "item.alice_dolls.patchouli_doll": "Patchouli Doll",
+  "item.alice_dolls.alice_doll": "Alice Doll"
 }

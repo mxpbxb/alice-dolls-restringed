@@ -69,7 +69,7 @@ const fn base(name: &'static str, item: &'static str, sprite: &'static str, held
     Doll { name, item, sprite, held, slots: DOLL_SLOTS, look: model::Look::Base }
 }
 
-static DOLLS: [Doll; 17] = [
+static DOLLS: [Doll; 20] = [
     base(goals::SHANGHAI, "alice_dolls:shanghai_doll", "alice_dolls:entity/shanghai", "minecraft:golden_sword"),
     base(goals::HORAI, "alice_dolls:horai_doll", "alice_dolls:entity/horai", "minecraft:golden_pickaxe"),
     base(goals::DIAMOND_HORAI, "alice_dolls:diamond_horai_doll", "alice_dolls:entity/horai", "minecraft:diamond_pickaxe"),
@@ -141,6 +141,31 @@ static DOLLS: [Doll; 17] = [
         held: "lunatic:yuuka_parasol",
         slots: EXTRA_SLOTS,
         look: model::Look::Boxes(&model::YUUKA),
+    },
+    // Yukari, Patchouli and Alice: their own models (mxpbxb's), two rows each.
+    Doll {
+        name: goals::YUKARI,
+        item: "alice_dolls:yukari_doll",
+        sprite: "alice_dolls:entity/yukari",
+        held: "",
+        slots: EXTRA_SLOTS,
+        look: model::Look::Boxes(&model::YUKARI),
+    },
+    Doll {
+        name: goals::PATCHOULI,
+        item: "alice_dolls:patchouli_doll",
+        sprite: "alice_dolls:entity/patchouli",
+        held: "minecraft:book",
+        slots: EXTRA_SLOTS,
+        look: model::Look::Boxes(&model::PATCHOULI),
+    },
+    Doll {
+        name: goals::ALICE,
+        item: "alice_dolls:alice_doll",
+        sprite: "alice_dolls:entity/alice",
+        held: "",
+        slots: EXTRA_SLOTS,
+        look: model::Look::Boxes(&model::ALICE),
     },
 ];
 
@@ -584,6 +609,12 @@ const FAVOUR_FIRST: f64 = 100.0;
 const FAVOUR_GROWTH: f64 = 1.75;
 /// What one Point item is worth.
 const POINT_FAVOUR: u32 = 5;
+/// A Max Doll Point (Touhou Items) is four Point items in one, and worth all four.
+const MAX_POINT_FAVOUR: u32 = POINT_FAVOUR * 4;
+/// What Russia and Moscow earn for each stack they pick up, and for each quarter hour they follow
+/// the doll they're bound to.
+const RUSSIA_FAVOUR: u32 = 3;
+const FOLLOW_FAVOUR_SECONDS: u32 = 15 * 60;
 
 /// Whether `bauble` turns away harm of `damage_type` (Touhou Little Maid's `onInjured`): from the
 /// doll wearing it, and from its owner while it rides on their head.
@@ -753,6 +784,7 @@ fn mob_head(kind: &str) -> Option<&'static str> {
 fn point_favour(item: &str) -> Option<u32> {
     Some(match item.strip_prefix("thkaguyamod:")? {
         "point_item" => POINT_FAVOUR,
+        "max_doll_point" => MAX_POINT_FAVOUR,
         "small_power_item" => 3,
         "star_item" | "faith_item" | "cherry_item" => 8,
         "ufo_red" | "ufo_blue" | "ufo_green" => 10,
@@ -1477,6 +1509,80 @@ fn kept_slot(n: usize, i: usize, item: &str) -> bool {
 }
 
 impl Mod {
+    /// Once a second: the Point, Power and Max Doll Point items a doll carries, it takes as favour,
+    /// as if it were given them.
+    fn use_points(&self, host: &mut dyn Host, id: u32, data: &mut DollData) {
+        if goals::chest_open() == Some(id) {
+            return;
+        }
+        let mut items = goals::inventory(id).unwrap_or_else(|| data.items.clone());
+        let mut worth = 0u32;
+        for slot in items.iter_mut() {
+            let w = slot.as_ref().and_then(|s| point_favour(&s.item).map(|w| w.saturating_mul(s.count)));
+            if let Some(w) = w {
+                worth = worth.saturating_add(w);
+                *slot = None;
+            }
+        }
+        if worth == 0 {
+            return;
+        }
+        goals::put_inventory(id, items.clone());
+        data.items = items;
+        self.add_favour(host, id, data, worth);
+        if let Some(doll) = doll_of(host, id) {
+            remember(id, doll, data);
+        }
+        let _ = DOLL.set(host, Holder::Entity(id), data.clone());
+    }
+
+    /// Doll `rescuer` picks up `hurt`, a badly hurt doll of the same owner's whose owner is away: it
+    /// goes into a free slot of the rescuer's as its item, with all it carries, as its owner would
+    /// pick it up.
+    fn rescue(&self, host: &mut dyn Host, hurt: u32, rescuer: u32) {
+        if goals::chest_open() == Some(hurt) || goals::chest_open() == Some(rescuer) {
+            return;
+        }
+        let (Some(doll), Some(_)) = (doll_of(host, hurt), doll_of(host, rescuer)) else { return };
+        let Some(dimension) = host.entity(hurt).and_then(|e| host.entity_level(e)).map(|l| l.dimension().to_owned()) else {
+            return;
+        };
+        let (hurt_holder, holder) = (Holder::Entity(hurt), Holder::Entity(rescuer));
+        if !DOLL.has(host, hurt_holder).unwrap_or(false) || !DOLL.has(host, holder).unwrap_or(false) {
+            return;
+        }
+        let lost = DOLL.get(host, hurt_holder).unwrap_or_default();
+        let mut data = DOLL.get(host, holder).unwrap_or_default();
+        if lost.owner == 0 || lost.owner != data.owner {
+            return;
+        }
+        let mut items = goals::inventory(rescuer).unwrap_or_else(|| data.items.clone());
+        let n = items.len();
+        let Some(slot) = (0..n).find(|&i| items[i].is_none() && !kept_slot(n, i, "")) else { return };
+        let k = Known {
+            doll,
+            owner: lost.owner,
+            items: goals::inventory(hurt).unwrap_or_else(|| lost.items.clone()),
+            baubles: lost.baubles.clone(),
+            favour: lost.favour,
+            form_level: lost.form_level,
+        };
+        let Some(stack) = belongings(&k).into_iter().next() else { return };
+        if !host.remove_mob(&dimension, hurt) {
+            return;
+        }
+        forget(hurt);
+        items[slot] = Some(stack);
+        data.xp = data.xp.saturating_add(lost.xp);
+        goals::put_inventory(rescuer, items.clone());
+        data.items = items;
+        if let Some(d) = doll_of(host, rescuer) {
+            remember(rescuer, d, &data);
+        }
+        let _ = DOLL.set(host, holder, data.clone());
+        say(host, rescuer, &data, 1, &format!("Picked up {} to keep it safe", doll.name));
+    }
+
     /// Once a second for each doll: which anchor it keeps to, and emptying itself into the chest
     /// there when it is close.
     fn anchor_work(&self, host: &mut dyn Host, id: u32, data: &mut DollData) {
@@ -1523,9 +1629,13 @@ impl Mod {
             return;
         }
         let mut moved = 0;
+        // It keeps its first stack of food to eat from; only food past that goes in the chest.
+        let mut kept_food = false;
         for (i, slot) in items.iter_mut().enumerate() {
             let Some(stack) = slot.take() else { continue };
-            if kept_slot(n, i, &stack.item) {
+            let first_food = !kept_food && goals::food_heal(&stack.item).is_some();
+            kept_food |= first_food;
+            if kept_slot(n, i, &stack.item) || first_food {
                 *slot = Some(stack);
                 continue;
             }
@@ -1630,6 +1740,8 @@ static BINDING: LazyLock<Mutex<HashMap<u128, u32>>> = LazyLock::new(Default::def
 static UUIDS: LazyLock<Mutex<HashMap<u128, u32>>> = LazyLock::new(Default::default);
 /// Ticks of each Moscow doll's, between looks at her doll's inventory.
 static MOSCOW_TICKS: LazyLock<Mutex<HashMap<u32, u32>>> = LazyLock::new(Default::default);
+/// Seconds each Russia or Moscow doll has followed its bound doll towards its next favour.
+static FOLLOWED: LazyLock<Mutex<HashMap<u32, u32>>> = LazyLock::new(Default::default);
 
 impl Mod {
     /// Gives doll `id` `points` of favour: on a new level it says so, heals to its new health, and
@@ -2405,18 +2517,19 @@ static COLLECT_TICKS: LazyLock<Mutex<HashMap<u32, u32>>> = LazyLock::new(Default
 
 /// `EntityDollAICollectItem`, the part a mob's goals cannot do: finds the nearest dropped item Russia
 /// has room for, for its goal to walk to, and takes whatever is within reach into its inventory.
-fn collect(host: &mut dyn Host, id: u32, moscow: bool) {
+/// The stacks it took come back as a count.
+fn collect(host: &mut dyn Host, id: u32, moscow: bool) -> u32 {
     let due = COLLECT_TICKS.lock().is_ok_and(|mut ticks| {
         let n = ticks.entry(id).or_default();
         *n = (*n + 1) % 5;
         *n == 0
     });
     if !due {
-        return;
+        return 0;
     }
-    let Some(entity) = host.entity(id) else { return };
+    let Some(entity) = host.entity(id) else { return 0 };
     let (Some(at), Some(level)) = (host.entity_position(entity), host.entity_level(entity)) else {
-        return;
+        return 0;
     };
     let dimension = level.dimension();
     let found = host.item_entities(
@@ -2462,7 +2575,7 @@ fn collect(host: &mut dyn Host, id: u32, moscow: bool) {
     }
     goals::set_item_target(id, nearest.map(|(_, d)| d));
     if taken.is_empty() {
-        return;
+        return 0;
     }
     doll_sound(host, id, "minecraft:entity.item.pickup", at, 0.2, 2.0);
     for (item, count) in &taken {
@@ -2474,6 +2587,7 @@ fn collect(host: &mut dyn Host, id: u32, moscow: bool) {
         remember(id, doll, &data);
     }
     let _ = DOLL.set(host, holder, data);
+    u32::try_from(taken.len()).unwrap_or(u32::MAX)
 }
 
 impl Hooks for Mod {
@@ -3040,6 +3154,9 @@ impl Hooks for Mod {
             goals::set_owners(seen);
         }
         // The blows dolls struck at players who hurt them or their owner: the doll is the attacker.
+        for (hurt, rescuer) in goals::take_rescues() {
+            self.rescue(host, hurt, rescuer);
+        }
         for (doll, foe, amount) in goals::take_player_hits() {
             if let Some(p) = players.iter().find(|p| p.uuid == foe) {
                 if let Ok(target) = u32::try_from(p.entity_id) {
@@ -3378,6 +3495,27 @@ impl Hooks for Mod {
             *n == 0
         });
         if due {
+            self.use_points(host, id, &mut data);
+            // Russia and Moscow earn favour for each quarter hour they follow their bound doll.
+            let following = data.bound != 0
+                && data.enabled
+                && data.mode != goals::STANDBY
+                && known(id).is_some_and(|k| k.doll.name == goals::RUSSIA || k.doll.name == goals::MOSCOW)
+                && UUIDS.lock().is_ok_and(|u| u.contains_key(&data.bound));
+            let earned = following
+                && FOLLOWED.lock().is_ok_and(|mut f| {
+                    let s = f.entry(id).or_default();
+                    *s += 1;
+                    let full = *s >= FOLLOW_FAVOUR_SECONDS;
+                    if full {
+                        *s = 0;
+                    }
+                    full
+                });
+            if earned {
+                self.add_favour(host, id, &mut data, RUSSIA_FAVOUR);
+                let _ = DOLL.set(host, holder, data.clone());
+            }
             self.anchor_work(host, id, &mut data);
             if absorb_xp(host, id, &mut data) {
                 let _ = DOLL.set(host, holder, data.clone());
@@ -3406,7 +3544,15 @@ impl Hooks for Mod {
         }
         // Every doll at work picks up what is dropped around it.
         if data.enabled && matches!(data.mode, goals::PATROL | goals::FOLLOW | goals::SECRET | goals::SECRET_ALL | goals::GIGA | goals::BLOOM) {
-            collect(host, id, moscow);
+            let picked = collect(host, id, moscow);
+            if picked > 0 {
+                // What it picked up is in its saved data now.
+                data = DOLL.get(host, holder).unwrap_or(data);
+                if moscow || russia {
+                    self.add_favour(host, id, &mut data, RUSSIA_FAVOUR * picked);
+                    let _ = DOLL.set(host, holder, data.clone());
+                }
+            }
         } else {
             goals::set_item_target(id, None);
         }
@@ -3779,6 +3925,37 @@ mod tests {
         assert_eq!(mob_head("minecraft:piglin"), Some("minecraft:piglin_head"));
         assert_eq!(mob_head("minecraft:spider"), None);
         assert_eq!(mob_head("minecraft:husk"), None);
+    }
+
+    #[test]
+    fn a_max_doll_point_is_worth_four_doll_points() {
+        assert_eq!(point_favour("thkaguyamod:max_doll_point"), Some(4 * POINT_FAVOUR));
+    }
+
+    #[test]
+    fn a_goliath_below_half_health_hits_twice_as_hard() {
+        assert_eq!(goals::goliath_fury(66.0, 66.0), 1.0);
+        assert_eq!(goals::goliath_fury(33.0, 66.0), 1.0);
+        assert_eq!(goals::goliath_fury(32.9, 66.0), 2.0);
+    }
+
+    #[test]
+    fn a_goliaths_foe_is_remembered_for_half_a_minute() {
+        goals::goliath_struck(91_001, 91_002);
+        assert_eq!(goals::goliath_foe(91_001), Some(91_002));
+        assert_eq!(goals::goliath_foe(91_003), None);
+    }
+
+    #[test]
+    fn the_new_dolls_are_dolls() {
+        for (name, item) in [
+            (goals::YUKARI, "alice_dolls:yukari_doll"),
+            (goals::PATCHOULI, "alice_dolls:patchouli_doll"),
+            (goals::ALICE, "alice_dolls:alice_doll"),
+        ] {
+            assert_eq!(doll_named(name).map(|d| d.item), Some(item));
+            assert!(goals::is_doll_item(item));
+        }
     }
 
     #[test]

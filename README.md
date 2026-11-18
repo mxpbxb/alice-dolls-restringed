@@ -31,6 +31,16 @@ Each recipe is the item in the top left, wool (Goliath: iron blocks), and a Doll
 | Wakasagi | tropical fish | Fishes; give her a fishing rod and she fishes with it and its enchantments. From love level 3 she fishes with at least Lure III and Luck of the Sea III of her own |
 | Goliath | diamond sword, iron blocks | Nearly three blocks tall: fights, knocks back, wears the armour in its first slots. Evolves into Netherite Goliath |
 | Yuuka | sunflower | Tills, plants and harvests, replanting; farmland trampled near her in the last five minutes she tills and plants again. |
+| Yukari | ender pearl | Fights hostile mobs |
+| Patchouli | book | Shoots homing stars at hostile mobs |
+| Alice | string | Fights hostile mobs |
+
+Fighting dolls go first for whatever is attacking them. A Goliath under half its health hits twice
+as hard, and a hostile mob it strikes turns on it rather than on its owner. When a doll is down to
+under 30% of its health, every doll within 16 blocks fights whoever hurt it (those that don't fight
+otherwise too), and if its owner is not within 24 blocks the nearest of the owner's dolls within 8
+picks it up and carries it as its item, with all it carries. A doll emptying itself into the chest
+keeps its first stack of food.
 
 Horai dolls mine coal and iron as with Fortune III (the rest with Silk Touch).
 
@@ -54,7 +64,9 @@ landed. Eating earns love, but not healing what you did to them yourself: hit yo
 eats until it is whole again earns nothing. Point and power items (dropped by
 [Touhou Mobs](https://github.com/mxpbxb/touhou-mobs), from
 [Touhou Items](https://github.com/mxpbxb/touhou-items)) earn love too: right-click to give the stack,
-sneak-click to give one.
+sneak-click to give one. A Max Doll Point is worth four Point items. Points a doll carries in its
+inventory it takes for itself. Russia and Moscow earn 3 love for each stack they pick up, and 3
+for each quarter hour they follow the doll they are bound to.
 Each level takes three quarters more than the last, and gives 3 more attack and 5 more health, each
 then 10% more, and makes the working dolls faster and stronger: mining, blasting, farming and fishing.
 Every three levels, a doll with a next form evolves. A doll's name tag shows its level and how far it
@@ -76,6 +88,7 @@ hooks) give the dolls their jobs.
 - **Touhou Little Maid** by TartaricAcid and others: the doll bell, doll anchor and bauble art, under
   [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/); its love levelling
   inspired this port's.
+- The Yukari, Patchouli and Alice dolls' models and art are mxpbxb's.
 - Port by mxpbxb.
 
 Touhou Project is by ZUN; this is a non-commercial fan work. No Minecraft code or assets are included.

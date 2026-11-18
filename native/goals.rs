@@ -29,6 +29,9 @@ pub const GOLIATH: &str = "Goliath Doll";
 pub const NETHERITE_GOLIATH: &str = "Netherite Goliath Doll";
 pub const YUUKA: &str = "Yuuka Doll";
 pub const MOSCOW: &str = "Moscow Doll";
+pub const YUKARI: &str = "Yukari Doll";
+pub const PATCHOULI: &str = "Patchouli Doll";
+pub const ALICE: &str = "Alice Doll";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Kind {
@@ -46,6 +49,9 @@ enum Kind {
     Goliath,
     NetheriteGoliath,
     Yuuka,
+    Yukari,
+    Patchouli,
+    Alice,
 }
 
 fn kind_of(m: &Mob) -> Option<Kind> {
@@ -67,6 +73,9 @@ fn kind_of(m: &Mob) -> Option<Kind> {
         GOLIATH => Some(Kind::Goliath),
         NETHERITE_GOLIATH => Some(Kind::NetheriteGoliath),
         YUUKA => Some(Kind::Yuuka),
+        YUKARI => Some(Kind::Yukari),
+        PATCHOULI => Some(Kind::Patchouli),
+        ALICE => Some(Kind::Alice),
         _ => None,
     }
 }
@@ -573,6 +582,15 @@ fn owner_position(m: &Mob, cx: &Cx) -> Option<[f64; 3]> {
 /// Runs before every mob's tick. Sheep take the shearing a doll gave them; a doll gets its goals.
 pub fn ensure(m: &mut Mob, w: &MobWorld) {
     spare_owner(m, w);
+    // A hostile mob a Goliath struck turns on the Goliath (its blows are its owner's, so the mob
+    // would go for the owner) while it is about, for half a minute after the last blow.
+    if m.category() == "monster"
+        && kind_of(m).is_none()
+        && let Some(g) = goliath_foe(m.id)
+        && w.seen(g).is_some_and(|s| s.alive)
+    {
+        m.ai.target = Some(Who::Mob(g));
+    }
     match m.species() {
         Species::Sheep => tick_sheep(m),
         Species::Chicken => tick_doll(m, w),
@@ -640,6 +658,27 @@ fn spare_owner(m: &mut Mob, w: &MobWorld) {
 
 /// The Goliath dolls about: hostile mobs may go for them.
 static GOLIATHS: LazyLock<Mutex<HashSet<u32>>> = LazyLock::new(Default::default);
+
+/// The mobs a Goliath struck: which Goliath, and when it last did.
+static GOLIATH_STRUCK: LazyLock<Mutex<HashMap<u32, (u32, std::time::Instant)>>> = LazyLock::new(Default::default);
+
+/// Goliath `goliath` struck mob `mob`.
+pub fn goliath_struck(mob: u32, goliath: u32) {
+    if let Ok(mut s) = GOLIATH_STRUCK.lock() {
+        s.retain(|_, (_, at)| at.elapsed() < GRUDGE);
+        s.insert(mob, (goliath, std::time::Instant::now()));
+    }
+}
+
+/// The Goliath that struck mob `mob` in the last half minute.
+pub fn goliath_foe(mob: u32) -> Option<u32> {
+    GOLIATH_STRUCK.lock().ok()?.get(&mob).filter(|(_, at)| at.elapsed() < GRUDGE).map(|(g, _)| *g)
+}
+
+/// A Goliath below half its health hits twice as hard.
+pub fn goliath_fury(health: f32, max: f32) -> f32 {
+    if max > 0.0 && health < max * 0.5 { 2.0 } else { 1.0 }
+}
 
 /// A hostile mob with nothing to do now and then (about once in twenty seconds) picks a Goliath
 /// doll within ten blocks that it can see, and gives up on it after ten seconds.
@@ -787,6 +826,9 @@ fn tick_doll(m: &mut Mob, w: &MobWorld) {
         m.attrs.speed *= 1.3;
     }
     let Some(state) = state(m.id) else { return };
+    if m.alive() && m.health < health * RESCUE_SHARE {
+        in_distress(m, w, state.owner);
+    }
     // Hurt, it eats from its own inventory: once every two seconds, healing what the food fills.
     // Whole again: what its owner did is forgotten.
     if m.health >= health && OWNER_HURT.lock().is_ok_and(|mut h| h.remove(&m.id)) {}
@@ -892,6 +934,17 @@ fn tick_doll(m: &mut Mob, w: &MobWorld) {
         Kind::GrandGuignol => {
             ai.goals.add(-10, Mission);
         }
+        // Alice fights as her dolls do; Patchouli with magic, Marisa's beam; Yukari strikes too.
+        Kind::Alice | Kind::Yukari => {
+            ai.goals.add(2, DollAttack::default());
+        }
+        Kind::Patchouli => {
+            ai.goals.add(1, Danmaku::new(Shot::Beam));
+        }
+    }
+    // The dolls that don't fight still stand up for a badly hurt doll near them.
+    if !fights(kind) {
+        ai.goals.add(0, DollAttack { defend_only: true, ..DollAttack::default() });
     }
     if kind != Kind::Russia {
         ai.goals.add(5, CollectItem::default());
@@ -1160,9 +1213,121 @@ pub fn owner_hurt_by(owner: u128, foe: Foe) {
 }
 
 /// Who doll `m` holds a grudge against: whoever hurt it, else whoever hurt its owner, in the last
-/// half minute. Never its owner, nor one of its owner's dolls.
+/// half minute, and whoever is after a badly hurt doll near it. Never its owner, nor one of its
+/// owner's dolls.
 fn grudge(m: &Mob) -> Vec<Foe> {
-    grudges_of(m.id, state(m.id).map_or(0, |s| s.owner))
+    let mut out = grudges_of(m.id, state(m.id).map_or(0, |s| s.owner));
+    for f in distress_foes(m) {
+        if !out.contains(&f) {
+            out.push(f);
+        }
+    }
+    out
+}
+
+/// Below this share of its health a doll is badly hurt: the dolls about fight whoever hurt it.
+pub const RESCUE_SHARE: f32 = 0.3;
+/// How far off a doll stands up for a badly hurt one.
+const DEFEND_RANGE: f64 = 16.0;
+/// How far off a doll picks up a badly hurt doll of its owner's, with the owner away.
+const RESCUE_RANGE: f64 = 8.0;
+/// How near its owner must be for a badly hurt doll to be left to them.
+const OWNER_NEAR: f64 = 24.0;
+
+/// The badly hurt dolls: who hurt each, where it was, and when.
+static DISTRESS: LazyLock<Mutex<HashMap<u32, (Foe, [f64; 3], std::time::Instant)>>> = LazyLock::new(Default::default);
+/// Badly hurt dolls to be picked up, and by which doll: the api crate does it.
+static RESCUES: Mutex<Vec<(u32, u32)>> = Mutex::new(Vec::new());
+
+/// Doll `m`, owned by `owner`, is badly hurt: whoever hurt it lately is every doll's foe about it,
+/// and with its owner away, the nearest of its owner's dolls picks it up (once a second).
+fn in_distress(m: &Mob, w: &MobWorld, owner: u128) {
+    let at = here(m);
+    let foe = DOLL_GRUDGES.lock().ok().and_then(|g| g.get(&m.id).filter(|(_, t)| t.elapsed() < GRUDGE).map(|(f, _)| *f));
+    if let (Some(foe), Ok(mut d)) = (foe, DISTRESS.lock()) {
+        d.retain(|_, (_, _, t)| t.elapsed() < GRUDGE);
+        d.insert(m.id, (foe, at, std::time::Instant::now()));
+    }
+    if m.age % 20 != 0 || owner == 0 || riding(m.id) {
+        return;
+    }
+    let dim = world_dimension(w);
+    let owner_near = OWNERS.lock().is_ok_and(|o| {
+        o.get(&owner).is_some_and(|p| {
+            let d2: f64 = (0..3).map(|i| (p.position[i] - at[i]).powi(2)).sum();
+            p.dimension == dim && d2 <= OWNER_NEAR * OWNER_NEAR
+        })
+    });
+    if owner_near {
+        return;
+    }
+    let rescuer = w
+        .others
+        .iter()
+        .filter(|s| s.alive && s.id != m.id && !riding(s.id) && state(s.id).is_some_and(|t| t.owner == owner))
+        .filter(|s| distance_sqr(m, pos(s)) <= RESCUE_RANGE * RESCUE_RANGE)
+        .min_by(|a, b| distance_sqr(m, pos(a)).total_cmp(&distance_sqr(m, pos(b))))
+        .map(|s| s.id);
+    if let (Some(r), Ok(mut q)) = (rescuer, RESCUES.lock())
+        && !q.iter().any(|(h, _)| *h == m.id)
+    {
+        q.push((m.id, r));
+    }
+}
+
+/// The badly hurt dolls to pick up since the last call, and who picks each up.
+pub fn take_rescues() -> Vec<(u32, u32)> {
+    RESCUES.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default()
+}
+
+/// Whoever is after a badly hurt doll within reach of doll `m`: never `m`'s owner, nor a doll of
+/// its owner's.
+fn distress_foes(m: &Mob) -> Vec<Foe> {
+    let owner = state(m.id).map_or(0, |s| s.owner);
+    let Ok(d) = DISTRESS.lock() else { return Vec::new() };
+    let mut out: Vec<Foe> = d
+        .iter()
+        .filter(|(id, (_, at, t))| **id != m.id && t.elapsed() < GRUDGE && distance_sqr(m, *at) <= DEFEND_RANGE * DEFEND_RANGE)
+        .map(|(_, (f, _, _))| *f)
+        .filter(|f| match *f {
+            Foe::Player(p) => p != owner,
+            Foe::Mob(other) => other != m.id && !spares(m.id, Who::Mob(other)),
+        })
+        .collect();
+    out.dedup();
+    out
+}
+
+/// Whether mob `s` is attacking doll `m`: it has `m` as its target, or hurt it in the last half minute.
+fn attacking_me(m: &Mob, s: &Seen) -> bool {
+    s.alive
+        && !is_doll_of_same_owner(m, s)
+        && (matches!(s.target, Some(Who::Mob(id)) if id == m.id)
+            || DOLL_GRUDGES
+                .lock()
+                .ok()
+                .and_then(|g| g.get(&m.id).copied())
+                .is_some_and(|(f, t)| f == Foe::Mob(s.id) && t.elapsed() < GRUDGE))
+}
+
+/// The nearest mob attacking doll `m`: a fighting doll goes for it before anything else.
+fn my_attacker(m: &Mob, cx: &Cx) -> Option<u32> {
+    nearest(m, cx, |s| attacking_me(m, s))
+}
+
+/// Whether a fighting doll should drop `target` for a mob attacking it (looked at twice a second).
+fn attacker_elsewhere(m: &Mob, cx: &Cx, target: Option<u32>) -> bool {
+    cx.w.game_time % 10 == 0
+        && !target.and_then(|t| cx.w.seen(t)).is_some_and(|s| attacking_me(m, s))
+        && my_attacker(m, cx).is_some()
+}
+
+/// The dolls with a fight of their own: the rest still defend a badly hurt doll.
+fn fights(kind: Kind) -> bool {
+    matches!(
+        kind,
+        Kind::Shanghai | Kind::Marisa | Kind::Reimu | Kind::Aya | Kind::Goliath | Kind::NetheriteGoliath | Kind::Alice | Kind::Yukari | Kind::Patchouli
+    )
 }
 
 /// [`grudge`] for doll `id` owned by `owner`.
@@ -1197,10 +1362,15 @@ fn is_doll_of_same_owner(m: &Mob, s: &Seen) -> bool {
 /// The player doll `m` goes after, if any: one who hurt it or its owner lately, in its level, not a
 /// spectator, and within the distance it notices things at. Their UUID and where they stand.
 fn player_foe(m: &Mob, w: &MobWorld) -> Option<(u128, OwnerSeen)> {
+    player_foe_among(m, w, grudge(m))
+}
+
+/// [`player_foe`] among `foes`.
+fn player_foe_among(m: &Mob, w: &MobWorld, foes: Vec<Foe>) -> Option<(u128, OwnerSeen)> {
     let here_dim = world_dimension(w);
     let from = here(m);
     let players = OWNERS.lock().ok()?;
-    grudge(m).into_iter().find_map(|f| {
+    foes.into_iter().find_map(|f| {
         let Foe::Player(p) = f else { return None };
         let o = players.get(&p).copied()?;
         let close = (o.position[0] - from[0]).abs() <= SEARCH_RANGE
@@ -1235,6 +1405,8 @@ fn fighting_mode(m: &Mob) -> bool {
 /// second, re-paths four times a second, and strikes as often as a stone sword can be swung.
 #[derive(Clone, Debug, Default)]
 struct DollAttack {
+    /// Only for a badly hurt doll near it: the dolls that don't fight otherwise.
+    defend_only: bool,
     target: Option<u32>,
     /// A player it goes after, when there is no mob to fight.
     player: Option<u128>,
@@ -1286,7 +1458,22 @@ impl Goal for DollAttack {
             return false;
         }
         self.last_scan = cx.w.game_time;
-        self.target = if in_mode(m, PATROL) {
+        if self.defend_only {
+            if !fighting_mode(m) {
+                return false;
+            }
+            let foes = distress_foes(m);
+            if foes.is_empty() {
+                return false;
+            }
+            self.target = nearest(m, cx, |s| foes.contains(&Foe::Mob(s.id)));
+            self.player = if self.target.is_none() { player_foe_among(m, cx.w, foes).map(|(p, _)| p) } else { None };
+            return self.target.is_some() || self.player.is_some();
+        }
+        // Whatever is attacking it comes first.
+        self.target = if let Some(a) = fighting_mode(m).then(|| my_attacker(m, cx)).flatten() {
+            Some(a)
+        } else if in_mode(m, PATROL) {
             nearest(m, cx, |s| enemy(s) || fights_back(m, s))
         } else if in_mode(m, FOLLOW) || in_mode(m, RIDE) {
             nearest(m, cx, |s| {
@@ -1299,11 +1486,16 @@ impl Goal for DollAttack {
         self.target.is_some() || self.player.is_some()
     }
     fn can_continue(&mut self, m: &mut Mob, cx: &mut Cx) -> bool {
+        if !self.defend_only && fighting_mode(m) && attacker_elsewhere(m, cx, self.target) {
+            return false;
+        }
         if let Some(p) = self.player {
             return fighting_mode(m) && self.lost < LOST_AFTER && player_foe(m, cx.w).is_some_and(|(q, _)| q == p);
         }
         let Some(s) = self.target.and_then(|id| cx.w.seen(id)) else { return false };
-        let keep = if in_mode(m, PATROL) {
+        let keep = if self.defend_only {
+            fighting_mode(m) && distress_foes(m).contains(&Foe::Mob(s.id))
+        } else if in_mode(m, PATROL) {
             true
         } else if in_mode(m, FOLLOW) || in_mode(m, RIDE) {
             // A following doll does not chase off: it lets go of anything that leaves its owner,
@@ -2743,16 +2935,20 @@ impl Goal for Danmaku {
         }
         self.last_scan = cx.w.game_time;
         let from = here(m);
-        self.target = cx
-            .w
-            .others
-            .iter()
-            .filter(|s| s.id != m.id && noticed(from, s) && Self::wanted(m, cx, s))
-            .min_by(|a, b| distance_sqr(m, pos(a)).total_cmp(&distance_sqr(m, pos(b))))
-            .map(|s| s.id);
+        // Whatever is attacking it comes first.
+        self.target = my_attacker(m, cx).or_else(|| {
+            cx.w.others
+                .iter()
+                .filter(|s| s.id != m.id && noticed(from, s) && Self::wanted(m, cx, s))
+                .min_by(|a, b| distance_sqr(m, pos(a)).total_cmp(&distance_sqr(m, pos(b))))
+                .map(|s| s.id)
+        });
         self.target.is_some()
     }
     fn can_continue(&mut self, m: &mut Mob, cx: &mut Cx) -> bool {
+        if self.allowed(m) && attacker_elsewhere(m, cx, self.target) {
+            return false;
+        }
         let hunting = self.allowed(m)
             && self.lost < LOST_AFTER
             && self.target.and_then(|id| cx.w.seen(id)).is_some_and(|s| s.alive);
@@ -2968,7 +3164,10 @@ impl Goal for GoliathAttack {
             return false;
         }
         self.last_scan = cx.w.game_time;
-        self.target = if in_mode(m, PATROL) {
+        // Whatever is attacking it comes first.
+        self.target = if let Some(a) = fighting_mode(m).then(|| my_attacker(m, cx)).flatten() {
+            Some(a)
+        } else if in_mode(m, PATROL) {
             nearest(m, cx, |s| enemy(s) || fights_back(m, s))
         } else if in_mode(m, FOLLOW) || in_mode(m, RIDE) {
             nearest(m, cx, |s| {
@@ -2982,6 +3181,9 @@ impl Goal for GoliathAttack {
         self.target.is_some() || self.player.is_some()
     }
     fn can_continue(&mut self, m: &mut Mob, cx: &mut Cx) -> bool {
+        if fighting_mode(m) && attacker_elsewhere(m, cx, self.target) {
+            return false;
+        }
         if let Some(p) = self.player {
             return fighting_mode(m) && self.lost < LOST_AFTER && player_foe(m, cx.w).is_some_and(|(q, _)| q == p);
         }
@@ -3017,7 +3219,8 @@ impl Goal for GoliathAttack {
             if distance_sqr(m, o.position) < GOLIATH_REACH_SQR {
                 m.swing();
                 mark_swing(m.id);
-                hit_player(m.id, p, attack(m.id, if self.strength > 0.0 { self.strength } else { GOLIATH_STRENGTH }));
+                let blow = attack(m.id, if self.strength > 0.0 { self.strength } else { GOLIATH_STRENGTH });
+                hit_player(m.id, p, blow * goliath_fury(m.health, m.attrs.max_health));
                 worked(m.id);
                 cx.events.push(MobEvent::Sound("entity.blaze.hurt", o.position, 0.8, 1.0));
             }
@@ -3048,9 +3251,11 @@ impl Goal for GoliathAttack {
             mark_swing(m.id);
             cx.events.push(MobEvent::AttackMob {
                 target: id,
-                amount: attack(m.id, if self.strength > 0.0 { self.strength } else { GOLIATH_STRENGTH }),
+                amount: attack(m.id, if self.strength > 0.0 { self.strength } else { GOLIATH_STRENGTH })
+                    * goliath_fury(m.health, m.attrs.max_health),
                 source: Damage::player(here(m)),
             });
+            goliath_struck(id, m.id);
             worked(m.id);
             let (dx, dz) = (at[0] - m.position.x, at[2] - m.position.z);
             let dr = (dx * dx + dz * dz + 0.01).sqrt();
