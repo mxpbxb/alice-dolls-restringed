@@ -403,6 +403,7 @@ fn mode_name(mode: u8) -> &'static str {
         goals::SECRET_ALL => "Secret mode, every ore: ancient debris, diamonds, gold and emeralds first, coal last",
         goals::GIGA => "Giga quarry: a 20x20 pit, down to bedrock",
         goals::BLOOM => "Secret mode: free bonemeal, and her wheat baked into bread",
+        goals::SNIPE => "Secret mode: twice the damage, at anything within 128 blocks",
         _ => "Standby mode",
     }
 }
@@ -1400,6 +1401,13 @@ fn beams_shown() -> Vec<([f64; 3], [f64; 3])> {
 
 /// Favour a doll earns for every [`goals::JOBS_PER_LOVE`] jobs done.
 const WORK_FAVOUR: u32 = 10;
+/// What a Netherite Horai earns, and all she earns by her work: five for each quarry dug to bedrock.
+const QUARRY_FAVOUR: u32 = 5;
+
+/// The tag Yukari Gaps reads to know a Yukari Doll's owner: they alone use her as a gap.
+fn owner_tag(owner: u128) -> String {
+    format!("alice_dolls.owner.{owner:032x}")
+}
 
 // ---- The doll bell: pick which dolls it brings back ----
 
@@ -1814,6 +1822,11 @@ impl Mod {
         }
         // Whether the player who clicked is sneaking (not whoever a doll last saw).
         let sneaking = player.sneaking;
+        // Yukari is her owner's portable gap: an empty-handed click is Yukari Gaps' to open its
+        // travel screen with.
+        if name == goals::YUKARI && held.is_none() && !sneaking {
+            return Flow::Continue;
+        }
         if held == Some("minecraft:lead") && self.bind(host, id, &mut data, &player) {
             tell_state(id, &data);
             let _ = DOLL.set(host, holder, data);
@@ -1837,6 +1850,15 @@ impl Mod {
                 data.enabled = true;
                 data.giga = Some(goals::giga_corner(at.map(|c| c.floor() as i32)));
             }
+            say(host, id, &data, 1, mode_name(data.mode));
+            click(host, id);
+            tell_state(id, &data);
+            let _ = DOLL.set(host, holder, data);
+            return Flow::Cancel;
+        }
+        if sneaking && held == Some("minecraft:book") && name == goals::PATCHOULI {
+            data.mode = if data.mode == goals::SNIPE { goals::STANDBY } else { goals::SNIPE };
+            data.enabled = true;
             say(host, id, &data, 1, mode_name(data.mode));
             click(host, id);
             tell_state(id, &data);
@@ -1971,6 +1993,8 @@ impl Mod {
                 }
                 return Flow::Cancel;
             }
+            // Yukari has the one mode: following.
+            _ if name == goals::YUKARI => {}
             _ => {
                 data.mode = next_mode_of(name, data.mode);
                 if data.mode == goals::PATROL
@@ -2724,7 +2748,13 @@ impl Hooks for Mod {
         for (kind, at, was) in shots {
             let centre = [0, 1, 2].map(|i| was[i] + (at[i] - was[i]) * partial);
             // Touhou Items Mod's own danmaku: Marisa's a yellow star-light, Reimu's a red talisman.
-            let quads: &[(&str, [f32; 4], f64, [u8; 4])] = if kind == 0 {
+            // Patchouli's orb: a big violet glow round a white core.
+            let quads: &[(&str, [f32; 4], f64, [u8; 4])] = if kind == 2 {
+                &[
+                    ("thkaguyamod:entity/shot/light", [0.0, 0.0, 8.0, 16.0], 0.8, [170, 90, 255, 220]),
+                    ("thkaguyamod:entity/shot/light", [0.0, 0.0, 8.0, 16.0], 0.35, [255, 255, 255, 255]),
+                ]
+            } else if kind == 0 {
                 &[
                     ("thkaguyamod:entity/shot/light", [0.0, 0.0, 8.0, 16.0], 0.45, [255, 220, 60, 210]),
                     ("thkaguyamod:entity/shot/light", [0.0, 0.0, 8.0, 16.0], 0.22, [255, 255, 255, 255]),
@@ -3316,8 +3346,18 @@ impl Hooks for Mod {
                 self.scroll_inventory(host, player, doll, window, rows);
             }
         }
-        // Every twenty jobs a doll does, it likes its owner a little more.
-        for worker in goals::take_worked() {
+        // Every twenty jobs a doll does, it likes its owner a little more; a Netherite Horai only
+        // for each quarry she finishes.
+        let netherite = |id: u32| known(id).is_some_and(|k| k.doll.name == goals::NETHERITE_HORAI);
+        for (worker, favour) in goals::take_quarried().into_iter().filter(|&id| netherite(id)).map(|id| (id, QUARRY_FAVOUR)) {
+            let holder = Holder::Entity(worker);
+            if DOLL.has(host, holder).unwrap_or(false) {
+                let mut data = DOLL.get(host, holder).unwrap_or_default();
+                self.add_favour(host, worker, &mut data, favour);
+                let _ = DOLL.set(host, holder, data);
+            }
+        }
+        for worker in goals::take_worked().into_iter().filter(|&id| !netherite(id)) {
             let holder = Holder::Entity(worker);
             if DOLL.has(host, holder).unwrap_or(false) {
                 let mut data = DOLL.get(host, holder).unwrap_or_default();
@@ -3496,6 +3536,24 @@ impl Hooks for Mod {
         });
         if due {
             self.use_points(host, id, &mut data);
+            // Yukari only ever follows, and wears her owner's tag for Yukari Gaps to know them by.
+            if known(id).is_some_and(|k| k.doll.name == goals::YUKARI) {
+                if data.mode != goals::FOLLOW || !data.enabled {
+                    data.mode = goals::FOLLOW;
+                    data.enabled = true;
+                    tell_state(id, &data);
+                    let _ = DOLL.set(host, holder, data.clone());
+                }
+                let tag = owner_tag(data.owner);
+                if let Some(e) = host.entity(id)
+                    && !host.entity_tags(e).is_some_and(|t| t.contains(&tag))
+                {
+                    for old in host.entity_tags(e).unwrap_or_default().into_iter().filter(|t| t.starts_with("alice_dolls.owner.")) {
+                        host.entity_remove_tag(e, &old);
+                    }
+                    host.entity_add_tag(e, &tag);
+                }
+            }
             // Russia and Moscow earn favour for each quarter hour they follow their bound doll.
             let following = data.bound != 0
                 && data.enabled
@@ -4217,6 +4275,11 @@ mod tests {
     fn a_players_uuid_reads_from_its_four_ints() {
         assert_eq!(goals::uuid_of([1, 2, 3, 4]), 1 << 96 | 2 << 64 | 3 << 32 | 4);
         assert_eq!(goals::uuid_of([-1, 0, 0, -1]), 0xffff_ffff << 96 | 0xffff_ffff);
+    }
+
+    #[test]
+    fn yukaris_tag_names_her_owner() {
+        assert_eq!(owner_tag(0xab), "alice_dolls.owner.000000000000000000000000000000ab");
     }
 
     #[test]

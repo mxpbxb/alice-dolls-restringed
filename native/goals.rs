@@ -301,6 +301,27 @@ pub fn take_worked() -> Vec<u32> {
     WORKED.lock().map(|mut w| std::mem::take(&mut *w)).unwrap_or_default()
 }
 
+/// The dolls that have just dug a quarry down to bedrock, for the api crate to give love to.
+static QUARRIED: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+
+fn quarried(id: u32) {
+    if let Ok(mut q) = QUARRIED.lock() {
+        q.push(id);
+    }
+}
+
+/// The dolls that finished a quarry since the last call, once for each.
+pub fn take_quarried() -> Vec<u32> {
+    QUARRIED.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default()
+}
+
+/// The dolls that do nothing yet (Alice): never a rescuer either.
+static IDLE: LazyLock<Mutex<std::collections::HashSet<u32>>> = LazyLock::new(Default::default);
+
+fn idle(id: u32) -> bool {
+    IDLE.lock().is_ok_and(|i| i.contains(&id))
+}
+
 /// An attack at `level`: each level adds 3, then a tenth more of all of it.
 pub fn levelled_attack(base: f32, level: u32) -> f32 {
     (0..level).fold(base, |d, _| (d + 3.0) * 1.1)
@@ -859,6 +880,11 @@ fn tick_doll(m: &mut Mob, w: &MobWorld) {
             g.insert(m.id);
         }
     }
+    if kind == Kind::Alice
+        && let Ok(mut i) = IDLE.lock()
+    {
+        i.insert(m.id);
+    }
     m.no_gravity = state.mode == RIDE;
     if state.mode == RIDE && state.enabled {
         sit_on_head(m, w);
@@ -934,25 +960,31 @@ fn tick_doll(m: &mut Mob, w: &MobWorld) {
         Kind::GrandGuignol => {
             ai.goals.add(-10, Mission);
         }
-        // Alice fights as her dolls do; Patchouli with magic, Marisa's beam; Yukari strikes too.
-        Kind::Alice | Kind::Yukari => {
+        // Yukari strikes as Shanghai does, following her owner (her one mode) as their portable gap.
+        Kind::Yukari => {
             ai.goals.add(2, DollAttack::default());
         }
+        // Patchouli snipes: one slow, heavy orb at a time, from far off.
         Kind::Patchouli => {
-            ai.goals.add(1, Danmaku::new(Shot::Beam));
+            ai.goals.add(1, Snipe::default());
         }
+        // Alice does nothing yet but go where her mode has her.
+        Kind::Alice => {}
     }
+    let idle = kind == Kind::Alice;
     // The dolls that don't fight still stand up for a badly hurt doll near them.
-    if !fights(kind) {
+    if !fights(kind) && !idle {
         ai.goals.add(0, DollAttack { defend_only: true, ..DollAttack::default() });
     }
-    if kind != Kind::Russia {
+    if kind != Kind::Russia && !idle {
         ai.goals.add(5, CollectItem::default());
     }
     ai.goals.add(4, MoscowFollow { recalculate_in: 0 });
     ai.goals.add(1, AnchorLeash { recalculate_in: 0, walked: 0 });
     ai.goals.add(12, AnchorHome { recalculate_in: 0, walked: 0 });
-    ai.goals.add(0, FoxHunt::default());
+    if !idle {
+        ai.goals.add(0, FoxHunt::default());
+    }
     ai.goals.add(12, DollFollow { recalculate_in: 0 });
     ai.goals.add(13, goals::Stroll::new(1.0).gate(patrolling).named("DollWander"));
     ai.goals.add(14, goals::LookAtPlayer::new(8.0));
@@ -1264,7 +1296,7 @@ fn in_distress(m: &Mob, w: &MobWorld, owner: u128) {
     let rescuer = w
         .others
         .iter()
-        .filter(|s| s.alive && s.id != m.id && !riding(s.id) && state(s.id).is_some_and(|t| t.owner == owner))
+        .filter(|s| s.alive && s.id != m.id && !riding(s.id) && !idle(s.id) && state(s.id).is_some_and(|t| t.owner == owner))
         .filter(|s| distance_sqr(m, pos(s)) <= RESCUE_RANGE * RESCUE_RANGE)
         .min_by(|a, b| distance_sqr(m, pos(a)).total_cmp(&distance_sqr(m, pos(b))))
         .map(|s| s.id);
@@ -1326,7 +1358,7 @@ fn attacker_elsewhere(m: &Mob, cx: &Cx, target: Option<u32>) -> bool {
 fn fights(kind: Kind) -> bool {
     matches!(
         kind,
-        Kind::Shanghai | Kind::Marisa | Kind::Reimu | Kind::Aya | Kind::Goliath | Kind::NetheriteGoliath | Kind::Alice | Kind::Yukari | Kind::Patchouli
+        Kind::Shanghai | Kind::Marisa | Kind::Reimu | Kind::Aya | Kind::Goliath | Kind::NetheriteGoliath | Kind::Yukari | Kind::Patchouli
     )
 }
 
@@ -2763,7 +2795,7 @@ struct Bullet {
 /// Ticks a shot flies before it fades.
 const BULLET_LIFE: i32 = 80;
 
-/// Every doll's shots in flight, by doll: which kind (0 a star, 1 an amulet), and where each is now
+/// Every doll's shots in flight, by doll: which kind (0 a star, 1 an amulet, 2 Patchouli's orb), and where each is now
 /// and was a tick ago. The api crate draws them each frame; the particles alone didn't show.
 static FLYING: LazyLock<Mutex<HashMap<u32, (u8, Vec<([f64; 3], [f64; 3])>)>>> = LazyLock::new(Default::default);
 
@@ -3034,6 +3066,246 @@ impl Goal for Danmaku {
     }
     fn name(&self) -> &'static str {
         "Danmaku"
+    }
+}
+
+// ---- Patchouli: a sniper's orb ----
+
+pub const SNIPE: u8 = 8;
+const SNIPE_RANGE: f64 = 64.0;
+const SNIPE_SECRET_RANGE: f64 = 128.0;
+/// Ticks between her orbs: one every four seconds, the last one landed first.
+const SNIPE_EVERY: i32 = 80;
+const SNIPE_DAMAGE: f32 = 20.0;
+/// Blocks an orb flies a tick, and the ticks it flies before it fades.
+const ORB_SPEED: f64 = 2.0;
+const ORB_LIFE: i32 = 100;
+/// How many of the nearest she looks along for a clear shot, at each look round.
+const SNIPE_LOOKS: usize = 8;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Mark {
+    Mob(u32),
+    Player(u128),
+}
+
+/// Patchouli's orb in flight: it homes in on its mark and hits nothing else.
+#[derive(Clone, Debug)]
+struct Orb {
+    at: [f64; 3],
+    mark: Mark,
+    damage: f32,
+    age: i32,
+}
+
+#[derive(Clone, Debug, Default)]
+struct Snipe {
+    mark: Option<Mark>,
+    orb: Option<Orb>,
+    counter: i32,
+    lost: i32,
+    last_scan: i64,
+}
+
+/// Whether `a` is within `range` of `b`.
+fn snipe_reach(a: [f64; 3], b: [f64; 3], range: f64) -> bool {
+    (0..3).map(|i| (a[i] - b[i]).powi(2)).sum::<f64>() <= range * range
+}
+
+impl Snipe {
+    fn allowed(m: &Mob) -> bool {
+        in_mode(m, PATROL) || in_mode(m, FOLLOW) || in_mode(m, RIDE) || in_mode(m, SNIPE)
+    }
+    fn range(m: &Mob) -> f64 {
+        if in_mode(m, SNIPE) { SNIPE_SECRET_RANGE } else { SNIPE_RANGE }
+    }
+    /// Where `mark` stands, and the middle of it to aim at, while it is alive and in her level.
+    fn where_is(w: &MobWorld, mark: Mark) -> Option<([f64; 3], [f64; 3])> {
+        match mark {
+            Mark::Mob(id) => w
+                .seen(id)
+                .filter(|s| s.alive)
+                .map(|s| (pos(s), [s.position.x, (s.position.y + s.eye_y) / 2.0, s.position.z])),
+            Mark::Player(p) => {
+                let o = OWNERS.lock().ok()?.get(&p).copied()?;
+                (o.dimension == world_dimension(w) && !o.spectator)
+                    .then_some((o.position, [o.position[0], (o.position[1] + o.eye[1]) / 2.0, o.position[2]]))
+            }
+        }
+    }
+    /// Whether she has a clear shot at `aim`.
+    fn in_sight(m: &mut Mob, w: &MobWorld, mark: Mark, aim: [f64; 3]) -> bool {
+        match mark {
+            Mark::Mob(id) => m.sees(w, Who::Mob(id)),
+            Mark::Player(_) => {
+                let eye = horizon_core::geometry::Vec3::new(m.position.x, m.position.y + m.kind.eye_height, m.position.z);
+                w.line_of_sight_for(Some(m.position.y), eye, horizon_core::geometry::Vec3::new(aim[0], aim[1], aim[2]))
+            }
+        }
+    }
+    /// What she shoots next: whatever is attacking her, else the nearest she has a clear shot at.
+    fn pick(m: &mut Mob, cx: &Cx) -> Option<Mark> {
+        let secret = in_mode(m, SNIPE);
+        let range = Self::range(m);
+        let from = here(m);
+        if let Some(a) = my_attacker(m, cx)
+            && cx.w.seen(a).is_some_and(|s| snipe_reach(pos(s), from, range))
+        {
+            return Some(Mark::Mob(a));
+        }
+        let owner = state(m.id).map_or(0, |s| s.owner);
+        let mut marks: Vec<(f64, Mark)> = cx
+            .w
+            .others
+            .iter()
+            .filter(|s| s.id != m.id && s.alive && snipe_reach(pos(s), from, range))
+            .filter(|s| {
+                if secret {
+                    !spares(m.id, Who::Mob(s.id))
+                } else {
+                    fights_back(m, s) || (enemy(s) && !spares(m.id, Who::Mob(s.id)))
+                }
+            })
+            .map(|s| (distance_sqr(m, pos(s)), Mark::Mob(s.id)))
+            .collect();
+        let dim = world_dimension(cx.w);
+        let foes = grudge(m);
+        if let Ok(players) = OWNERS.lock() {
+            for (&p, o) in players.iter() {
+                let wanted = secret || foes.contains(&Foe::Player(p));
+                if p != owner && wanted && o.dimension == dim && !o.spectator && snipe_reach(o.position, from, range) {
+                    marks.push((distance_sqr(m, o.position), Mark::Player(p)));
+                }
+            }
+        }
+        marks.sort_by(|a, b| a.0.total_cmp(&b.0));
+        marks.into_iter().take(SNIPE_LOOKS).map(|(_, k)| k).find(|&k| {
+            Self::where_is(cx.w, k).is_some_and(|(_, aim)| Self::in_sight(m, cx.w, k, aim))
+        })
+    }
+    fn fire(&mut self, m: &mut Mob, cx: &mut Cx, mark: Mark) {
+        let muzzle = [m.position.x, m.position.y + m.kind.eye_height, m.position.z];
+        let base = attack(m.id, SNIPE_DAMAGE);
+        let damage = if in_mode(m, SNIPE) { base * 2.0 } else { base };
+        self.orb = Some(Orb { at: muzzle, mark, damage, age: 0 });
+        cx.events.push(MobEvent::Sound("entity.evoker.cast_spell", muzzle, 1.0, 0.8));
+        m.swing();
+        mark_swing(m.id);
+    }
+    fn fly(&mut self, m: &Mob, cx: &mut Cx) {
+        let Some(orb) = self.orb.as_mut() else { return };
+        orb.age += 1;
+        let was = orb.at;
+        let landed = match Self::where_is(cx.w, orb.mark) {
+            None => true,
+            Some(_) if orb.age > ORB_LIFE => true,
+            Some((_, aim)) => {
+                let d = [aim[0] - orb.at[0], aim[1] - orb.at[1], aim[2] - orb.at[2]];
+                let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+                if len <= ORB_SPEED + 0.5 {
+                    match orb.mark {
+                        // DamageSource.causePlayerDamage(owner): the kill is the owner's.
+                        Mark::Mob(target) => {
+                            cx.events.push(MobEvent::AttackMob { target, amount: orb.damage, source: Damage::player(here(m)) });
+                            worked(m.id);
+                        }
+                        Mark::Player(p) => hit_player(m.id, p, orb.damage),
+                    }
+                    cx.events.push(MobEvent::ParticleAt { kind: "flash", at: aim, velocity: [0.0; 3] });
+                    cx.events.push(MobEvent::ParticleAt { kind: "witch", at: aim, velocity: [0.0; 3] });
+                    cx.events.push(MobEvent::Sound("entity.firework_rocket.blast", aim, 1.0, 0.6));
+                    true
+                } else {
+                    for c in 0..3 {
+                        orb.at[c] += d[c] / len * ORB_SPEED;
+                    }
+                    cx.events.push(MobEvent::ParticleColored { at: orb.at, color: [0.7, 0.35, 1.0] });
+                    cx.events.push(MobEvent::ParticleAt { kind: "witch", at: orb.at, velocity: [0.0; 3] });
+                    false
+                }
+            }
+        };
+        let at = orb.at;
+        if landed {
+            self.orb = None;
+        }
+        if let Ok(mut f) = FLYING.lock() {
+            if landed {
+                f.remove(&m.id);
+            } else {
+                f.insert(m.id, (2, vec![(at, was)]));
+            }
+        }
+    }
+}
+
+impl Goal for Snipe {
+    fn flags(&self) -> u8 {
+        goals::LOOK
+    }
+    fn can_use(&mut self, m: &mut Mob, cx: &mut Cx) -> bool {
+        if !Self::allowed(m) || cx.w.game_time - self.last_scan < 20 {
+            return false;
+        }
+        self.last_scan = cx.w.game_time;
+        self.mark = Self::pick(m, cx);
+        self.mark.is_some()
+    }
+    fn can_continue(&mut self, m: &mut Mob, cx: &mut Cx) -> bool {
+        let mob = match self.mark {
+            Some(Mark::Mob(id)) => Some(id),
+            _ => None,
+        };
+        if Self::allowed(m) && self.orb.is_none() && attacker_elsewhere(m, cx, mob) {
+            return false;
+        }
+        let range = Self::range(m) * 1.1;
+        let from = here(m);
+        let hunting = Self::allowed(m)
+            && self.lost < LOST_AFTER
+            && self.mark.and_then(|k| Self::where_is(cx.w, k)).is_some_and(|(at, _)| snipe_reach(at, from, range));
+        hunting || self.orb.is_some()
+    }
+    fn start(&mut self, _: &mut Mob, _: &mut Cx) {
+        self.counter = 10;
+        self.lost = 0;
+    }
+    fn stop(&mut self, m: &mut Mob, _: &mut Cx) {
+        self.mark = None;
+        self.orb = None;
+        if let Ok(mut f) = FLYING.lock() {
+            f.remove(&m.id);
+        }
+    }
+    fn every_tick(&self) -> bool {
+        true
+    }
+    fn tick(&mut self, m: &mut Mob, cx: &mut Cx) {
+        self.fly(m, cx);
+        let Some(mark) = self.mark else { return };
+        let Some((_, aim)) = Self::where_is(cx.w, mark).filter(|_| Self::allowed(m)) else {
+            self.mark = None;
+            return;
+        };
+        m.look_at(aim);
+        self.counter -= 1;
+        if self.counter > 0 || self.orb.is_some() {
+            return;
+        }
+        if Self::in_sight(m, cx.w, mark, aim) {
+            self.lost = 0;
+            self.counter = SNIPE_EVERY;
+            self.fire(m, cx, mark);
+        } else {
+            self.lost += 10;
+            self.counter = 10;
+        }
+    }
+    fn box_clone(&self) -> Box<dyn Goal> {
+        Box::new(self.clone())
+    }
+    fn name(&self) -> &'static str {
+        "Snipe"
     }
 }
 
@@ -4360,6 +4632,7 @@ impl Quarry {
             || layer_cells(site, next).iter().any(|&p| &*name_at(cx.w, p) == "minecraft:bedrock");
         if bedrock {
             say(m.id, 1, "Bedrock! Coming back");
+            quarried(m.id);
             self.finish(m, cx);
             return;
         }
@@ -4516,6 +4789,7 @@ impl GigaQuarry {
         if next < WORLD_BOTTOM || self.hard * 2 >= (GIGA_SIZE * GIGA_SIZE) as usize {
             self.done = true;
             say(m.id, 1, "Giga quarry done: bedrock!");
+            quarried(m.id);
             return;
         }
         self.layer = Some(next);
