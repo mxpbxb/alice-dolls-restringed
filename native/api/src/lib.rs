@@ -472,7 +472,7 @@ fn is_horai(name: &str) -> bool {
 const BLOOM_ITEM: &str = "minecraft:cactus";
 
 /// What a giga quarry is entered with: sneak and right-click a Horai holding this.
-const GIGA_PICKAXE: &str = "minecraft:netherite_pickaxe";
+const GIGA_PICKAXE: &str = "minecraft:golden_pickaxe";
 
 static DOLL: AttachmentType<DollData> = AttachmentType {
     namespace: "alice_dolls",
@@ -1825,7 +1825,7 @@ impl Mod {
             let _ = DOLL.set(host, holder, data);
             return Flow::Cancel;
         }
-        // Any Horai, sneak and right-clicked with a netherite pickaxe: the giga quarry, a 20x20 pit
+        // Any Horai, sneak and right-clicked with a golden pickaxe: the giga quarry, a 20x20 pit
         // round where she stands, to bedrock. Again, and she stands by.
         if sneaking && held == Some(GIGA_PICKAXE) && is_horai(name) {
             if data.mode == goals::GIGA {

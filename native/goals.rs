@@ -4378,7 +4378,7 @@ impl Quarry {
 
 // ---- The giga quarry ----
 
-/// Sneak and right-click a Horai with a netherite pickaxe: the giga quarry. She digs out a 20x20
+/// Sneak and right-click a Horai with a golden pickaxe: the giga quarry. She digs out a 20x20
 /// pit, layer by layer, from where she stood down to bedrock, at her own pace (and the netherite
 /// one twice over, as in her quarry). She never digs a block beside lava or water, so the pit
 /// doesn't flood: those stay as walls. Again, or any other order, ends it.
