@@ -981,7 +981,8 @@ fn tick_doll(m: &mut Mob, w: &MobWorld) {
     if !fights(kind) && !peaceful {
         ai.goals.add(0, DollAttack { defend_only: true, ..DollAttack::default() });
     }
-    if kind != Kind::Russia && !idle {
+    // Yukari doesn't go for dropped items either.
+    if kind != Kind::Russia && !peaceful {
         ai.goals.add(5, CollectItem::default());
     }
     ai.goals.add(4, MoscowFollow { recalculate_in: 0 });

@@ -3645,8 +3645,9 @@ impl Hooks for Mod {
         if known(id).is_some_and(|k| k.doll.name == goals::GRAND_GUIGNOL) {
             cook(host, id);
         }
-        // Every doll at work picks up what is dropped around it.
-        if data.enabled && matches!(data.mode, goals::PATROL | goals::FOLLOW | goals::SECRET | goals::SECRET_ALL | goals::GIGA | goals::BLOOM) {
+        // Every doll at work picks up what is dropped around it, but Yukari.
+        let yukari = known(id).is_some_and(|k| k.doll.name == goals::YUKARI);
+        if !yukari && data.enabled && matches!(data.mode, goals::PATROL | goals::FOLLOW | goals::SECRET | goals::SECRET_ALL | goals::GIGA | goals::BLOOM) {
             // Russia and Moscow: round the doll they follow too, when it is here.
             let around = if moscow || russia {
                 UUIDS
