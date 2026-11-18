@@ -1490,6 +1490,348 @@ fn switch_slot(view: usize) -> usize {
 /// Whether this screen's outlines were logged yet (once a screen, to the debug log).
 static OUTLINES_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+// ---- Alice's panel: her owner's other dolls, from anywhere ----
+
+/// Players who right-clicked their Alice empty-handed, for her panel to open on the next server tick.
+static PENDING_ALICE: Mutex<Vec<u128>> = Mutex::new(Vec::new());
+
+/// A player's Alice panel: its window, the dolls it lists in order, the ones ticked, and whether
+/// the next doll clicked is the one the ticked dolls' items go to.
+#[derive(Clone, Default)]
+struct AlicePanel {
+    window: i32,
+    ids: Vec<u32>,
+    ticked: std::collections::HashSet<u32>,
+    sending: bool,
+}
+
+static ALICE_OPEN: LazyLock<Mutex<HashMap<u128, AlicePanel>>> = LazyLock::new(Default::default);
+
+/// Most dolls the panel lists: four rows, with two rows of buttons under them.
+const ALICE_MAX: usize = 36;
+
+// The buttons, counted from the first button row: the orders, then the bell, the inventory and the
+// item sending.
+const A_ALL: usize = 0;
+const A_STANDBY: usize = 1;
+const A_PATROL: usize = 2;
+const A_FOLLOW: usize = 3;
+const A_RIDE: usize = 4;
+const A_AI_ON: usize = 5;
+const A_AI_OFF: usize = 6;
+const A_NONE: usize = 8;
+const A_BELL: usize = 9 + 1;
+const A_OPEN: usize = 9 + 3;
+const A_SEND: usize = 9 + 5;
+const A_REFRESH: usize = 9 + 7;
+/// While sending: the one button, Cancel.
+const A_CANCEL: usize = 9 + 4;
+
+/// What a doll is doing, in a word or two, as Alice's panel shows it.
+fn doing(mode: u8) -> &'static str {
+    match mode {
+        goals::STANDBY => "Standby",
+        goals::PATROL => "Patrol",
+        goals::FOLLOW => "Follow",
+        goals::RIDE => "Rideon",
+        goals::GIGA => "Giga quarry",
+        _ => "Busy",
+    }
+}
+
+/// A panel item: `item`, named `text`, shining when `glint`.
+fn panel_item(item: &str, text: &str, glint: bool) -> Option<ItemStack> {
+    let mut s = ItemStack::new(item, 1);
+    s.extra = Some(Box::new(StackData {
+        custom_name: Some(Tag::String(text.into())),
+        enchantments: if glint { vec![("minecraft:unbreaking".into(), 1)] } else { Vec::new() },
+        ..StackData::default()
+    }));
+    Some(s)
+}
+
+/// The panel's items: each doll, with what it is doing, its love level and how far off it is
+/// (shining if ticked), then the two rows of buttons.
+fn alice_items(host: &mut dyn Host, player: u128, panel: &AlicePanel) -> Vec<Option<ItemStack>> {
+    let me = host.server_players().into_iter().find(|p| p.uuid == player);
+    let rows = panel.ids.len().div_ceil(9).max(1);
+    let mut items: Vec<Option<ItemStack>> = vec![None; rows * 9];
+    for (k, &id) in panel.ids.iter().enumerate() {
+        let Some(doll) = doll_of(host, id) else { continue };
+        let holder = Holder::Entity(id);
+        if !DOLL.has(host, holder).unwrap_or(false) {
+            items[k] = panel_item("minecraft:gray_dye", &format!("{} : gone", doll.name), false);
+            continue;
+        }
+        let data = DOLL.get(host, holder).unwrap_or_default();
+        let where_ = match host.entity(id).and_then(|e| Some((host.entity_level(e)?.dimension().to_owned(), host.entity_position(e)?))) {
+            Some((dim, at)) => match &me {
+                Some(p) if p.dimension == dim => {
+                    format!("{:.0} m", (0..3).map(|i| (at[i] - p.position[i]).powi(2)).sum::<f64>().sqrt())
+                }
+                _ => format!("in {}", dim.trim_start_matches("minecraft:").replace('_', " ")),
+            },
+            None => "far away".to_owned(),
+        };
+        let ticked = panel.ticked.contains(&id);
+        let mut text = format!(
+            "{} {} · {} · Lv {} · {where_}",
+            if ticked { "[x]" } else { "[ ]" },
+            doll.name,
+            doing(data.mode),
+            favour_level(data.favour).0
+        );
+        if !data.enabled {
+            text.push_str(" · AI off");
+        }
+        items[k] = panel_item(doll.item, &text, ticked);
+    }
+    let pane = || panel_item("minecraft:gray_stained_glass_pane", " ", false);
+    let mut buttons = vec![pane(); 18];
+    if panel.sending {
+        buttons[4] = panel_item("minecraft:hopper", "Click the doll the ticked dolls' items go to", true);
+        buttons[A_CANCEL] = panel_item("minecraft:barrier", "Cancel", false);
+    } else {
+        buttons[A_ALL] = panel_item("minecraft:lime_dye", "Select all", false);
+        buttons[A_STANDBY] = panel_item("minecraft:white_bed", "Standby", false);
+        buttons[A_PATROL] = panel_item("minecraft:compass", "Patrol", false);
+        buttons[A_FOLLOW] = panel_item("minecraft:lead", "Follow", false);
+        buttons[A_RIDE] = panel_item("minecraft:saddle", "Rideon", false);
+        buttons[A_AI_ON] = panel_item("minecraft:redstone_torch", "Work AI on", false);
+        buttons[A_AI_OFF] = panel_item("minecraft:lever", "Work AI off", false);
+        buttons[A_NONE] = panel_item("minecraft:gray_dye", "Select none", false);
+        buttons[A_BELL] = panel_item("minecraft:bell", "Ring: bring the ticked dolls back", false);
+        buttons[A_OPEN] = panel_item("minecraft:chest", "Open the first ticked doll's inventory", false);
+        buttons[A_SEND] = panel_item("minecraft:hopper", "Send the ticked dolls' items to another doll", false);
+        buttons[A_REFRESH] = panel_item("minecraft:clock", "Refresh", false);
+    }
+    items.extend(buttons);
+    items
+}
+
+impl Mod {
+    /// Alice's panel, for `player`: their other dolls, wherever they are.
+    fn open_alice(&self, host: &mut dyn Host, player: u128) {
+        let ids: Vec<u32> = owned_dolls(player)
+            .into_iter()
+            .filter(|&id| known(id).is_some_and(|k| k.doll.name != goals::ALICE))
+            .take(ALICE_MAX)
+            .collect();
+        if ids.is_empty() {
+            host.action_bar(player, Text::literal("Alice Doll : you have no other dolls out"));
+            return;
+        }
+        let mut panel = AlicePanel { ids, ..AlicePanel::default() };
+        let items = alice_items(host, player, &panel);
+        let rows = (items.len() / 9).clamp(1, 6) as u8;
+        let Some(window) = host.open_menu(player, rows, Text::literal("Alice: your dolls"), items) else { return };
+        panel.window = window;
+        ALICE_OPEN.lock().ok().map(|mut a| a.insert(player, panel));
+    }
+
+    /// A click in Alice's panel: a doll ticked (or, while sending, chosen), or a button.
+    fn alice_clicked(&self, host: &mut dyn Host, player: u128, slot: i32) {
+        let Some(mut panel) = ALICE_OPEN.lock().ok().and_then(|a| a.get(&player).cloned()) else { return };
+        let Ok(slot) = usize::try_from(slot) else { return };
+        let first_button = panel.ids.len().div_ceil(9).max(1) * 9;
+        let ticked: Vec<u32> = panel.ids.iter().copied().filter(|id| panel.ticked.contains(id)).collect();
+        let tell = |host: &mut dyn Host, text: &str| host.action_bar(player, Text::literal(text));
+        if slot < panel.ids.len() {
+            let id = panel.ids[slot];
+            if panel.sending {
+                panel.sending = false;
+                let from: Vec<u32> = ticked.iter().copied().filter(|&t| t != id).collect();
+                let text = self.send_items(host, &from, id);
+                tell(host, &text);
+            } else if !panel.ticked.remove(&id) {
+                panel.ticked.insert(id);
+            }
+        } else if slot >= first_button {
+            let button = slot - first_button;
+            if panel.sending {
+                if button != A_CANCEL {
+                    return;
+                }
+                panel.sending = false;
+            } else {
+                let needs_ticked = matches!(button, A_STANDBY | A_PATROL | A_FOLLOW | A_RIDE | A_AI_ON | A_AI_OFF | A_BELL | A_OPEN | A_SEND);
+                if needs_ticked && ticked.is_empty() {
+                    tell(host, "Tick some dolls first");
+                    return;
+                }
+                match button {
+                    A_ALL => panel.ticked = panel.ids.iter().copied().collect(),
+                    A_NONE => panel.ticked.clear(),
+                    A_STANDBY => self.order(host, player, &ticked, goals::STANDBY),
+                    A_PATROL => self.order(host, player, &ticked, goals::PATROL),
+                    A_FOLLOW => self.order(host, player, &ticked, goals::FOLLOW),
+                    A_RIDE => self.order(host, player, &ticked, goals::RIDE),
+                    A_AI_ON | A_AI_OFF => self.switch_ai(host, player, &ticked, button == A_AI_ON),
+                    A_BELL => {
+                        ALICE_OPEN.lock().ok().map(|mut a| a.remove(&player));
+                        host.close_menu(player);
+                        if let Some(p) = host.server_players().into_iter().find(|p| p.uuid == player) {
+                            self.recall(host, &p, ticked);
+                        }
+                        return;
+                    }
+                    A_OPEN => {
+                        ALICE_OPEN.lock().ok().map(|mut a| a.remove(&player));
+                        host.close_menu(player);
+                        PENDING.lock().ok().map(|mut p| p.push((player, ticked[0])));
+                        return;
+                    }
+                    A_SEND => panel.sending = true,
+                    A_REFRESH => {}
+                    _ => return,
+                }
+            }
+        } else {
+            return;
+        }
+        let items = alice_items(host, player, &panel);
+        host.set_menu_items(player, items);
+        ALICE_OPEN.lock().ok().map(|mut a| a.insert(player, panel));
+        if let Some(p) = host.server_players().into_iter().find(|p| p.uuid == player) {
+            player_sound(host, &p.dimension, "minecraft:ui.button.click", p.position, 0.4, 1.2);
+        }
+    }
+
+    /// Dolls `ids` of `owner`'s switch to `mode` (Standby, Patrol, Follow or Rideon), as a click on
+    /// each would: a Goliath never rides, and Yukari only follows.
+    fn order(&self, host: &mut dyn Host, owner: u128, ids: &[u32], mode: u8) {
+        let (mut done, mut cannot) = (0, 0);
+        for &id in ids {
+            let holder = Holder::Entity(id);
+            let Some(doll) = doll_of(host, id) else { continue };
+            if !DOLL.has(host, holder).unwrap_or(false) {
+                continue;
+            }
+            let mut data = DOLL.get(host, holder).unwrap_or_default();
+            if data.owner != owner
+                || (doll.name == goals::YUKARI && mode != goals::FOLLOW)
+                || (mode == goals::RIDE && is_goliath(doll.name))
+            {
+                cannot += 1;
+                continue;
+            }
+            if data.mode == goals::GIGA {
+                data.giga = None;
+            }
+            data.mode = mode;
+            if mode == goals::PATROL
+                && let Some(e) = host.entity(id)
+                && let (Some(at), Some(level)) = (host.entity_position(e), host.entity_level(e))
+            {
+                let dimension = level.dimension().to_owned();
+                data.anchor = nearest_anchor(&dimension, owner, at);
+            }
+            say(host, id, &data, 1, mode_name(mode));
+            click(host, id);
+            tell_state(id, &data);
+            let _ = DOLL.set(host, holder, data);
+            done += 1;
+        }
+        let mut text = format!("{done} {}: {}", if done == 1 { "doll" } else { "dolls" }, doing(mode));
+        if cannot > 0 {
+            text.push_str(&format!(" ({cannot} can't)"));
+        }
+        host.action_bar(owner, Text::literal(text));
+    }
+
+    /// Dolls `ids` of `owner`'s turn their work AI on or off, as a Doll Core would.
+    fn switch_ai(&self, host: &mut dyn Host, owner: u128, ids: &[u32], on: bool) {
+        let mut done = 0;
+        for &id in ids {
+            let holder = Holder::Entity(id);
+            if !DOLL.has(host, holder).unwrap_or(false) {
+                continue;
+            }
+            let mut data = DOLL.get(host, holder).unwrap_or_default();
+            if data.owner != owner {
+                continue;
+            }
+            data.enabled = on;
+            say(host, id, &data, 1, if on { "Work AI ON" } else { "Work AI OFF" });
+            tell_state(id, &data);
+            let _ = DOLL.set(host, holder, data);
+            done += 1;
+        }
+        let text = format!("{done} {}: work AI {}", if done == 1 { "doll" } else { "dolls" }, if on { "on" } else { "off" });
+        host.action_bar(owner, Text::literal(text));
+    }
+
+    /// What dolls `from` carry goes to doll `to`, however far apart they are: all but what a doll
+    /// keeps when it empties itself into a chest (armour, shield, torches, its first stack of food)
+    /// and any doll it carries, into `to`'s own slots (not its armour or shield). What it tells the
+    /// owner.
+    fn send_items(&self, host: &mut dyn Host, from: &[u32], to: u32) -> String {
+        let Some(target) = doll_of(host, to) else { return "That doll is gone".to_owned() };
+        let holder = Holder::Entity(to);
+        if !DOLL.has(host, holder).unwrap_or(false) {
+            return format!("{} is gone", target.name);
+        }
+        if goals::chest_open() == Some(to) {
+            return format!("{}'s inventory is open", target.name);
+        }
+        let data = DOLL.get(host, holder).unwrap_or_default();
+        let mut mine = goals::inventory(to).unwrap_or_else(|| data.items.clone());
+        let n = mine.len();
+        let general = if n > goals::ARMOUR_SLOTS { goals::shield_slot(n) } else { n };
+        let moscow = target.name == goals::MOSCOW;
+        let (mut moved, mut full) = (0, false);
+        for &source in from {
+            if source == to || goals::chest_open() == Some(source) {
+                continue;
+            }
+            let Some(mut theirs) = goals::inventory(source) else { continue };
+            let count = theirs.len();
+            let mut kept_food = false;
+            let mut took = false;
+            for (i, slot) in theirs.iter_mut().enumerate() {
+                let Some(s) = slot.as_mut() else { continue };
+                let first_food = !kept_food && goals::food_heal(&s.item).is_some();
+                kept_food |= first_food;
+                let kept = first_food
+                    || kept_slot(count, i, &s.item)
+                    || goals::armour_part(&s.item).is_some()
+                    || &*s.item == "minecraft:shield"
+                    || goals::is_doll_item(&s.item);
+                if kept {
+                    continue;
+                }
+                let max = if moscow { MOSCOW_STACK } else { host.max_stack_size(&s.item).unwrap_or(64) };
+                let left = store_some(&mut mine[..general], s, max);
+                full |= left > 0;
+                if left < s.count {
+                    moved += 1;
+                    took = true;
+                    s.count = left;
+                    if left == 0 {
+                        *slot = None;
+                    }
+                }
+            }
+            if took {
+                goals::put_inventory(source, theirs.clone());
+                self.store_items(host, source, theirs, false);
+            }
+        }
+        if moved > 0 {
+            goals::put_inventory(to, mine.clone());
+            self.store_items(host, to, mine, false);
+            if let Some(at) = host.entity(to).and_then(|e| host.entity_position(e)) {
+                doll_sound(host, to, "minecraft:entity.item.pickup", at, 0.6, 1.0);
+            }
+        }
+        match (moved, full) {
+            (0, true) => format!("{} is full", target.name),
+            (0, false) => "Nothing to send".to_owned(),
+            (m, f) => format!("Sent {m} {} to {}{}", if m == 1 { "stack" } else { "stacks" }, target.name, if f { " (full now)" } else { "" }),
+        }
+    }
+}
+
 // ---- The doll anchor ----
 
 const ANCHOR: &str = "alice_dolls:doll_anchor";
@@ -1852,6 +2194,11 @@ impl Mod {
         // travel screen with.
         if name == goals::YUKARI && held.is_none() && !sneaking {
             return Flow::Continue;
+        }
+        // Alice, right-clicked empty-handed: her panel of her owner's other dolls.
+        if name == goals::ALICE && held.is_none() && !sneaking {
+            PENDING_ALICE.lock().ok().map(|mut p| p.push(player.uuid));
+            return Flow::Cancel;
         }
         if held == Some("minecraft:lead") && self.bind(host, id, &mut data, &player) {
             tell_state(id, &data);
@@ -3049,6 +3396,10 @@ impl Hooks for Mod {
 
     /// The keep-or-void switch in a Diamond or Netherite Horai's inventory screen.
     fn menu_clicked(&self, host: &mut dyn Host, event: &mut MenuClickedEvent) {
+        if ALICE_OPEN.lock().ok().is_some_and(|a| a.get(&event.uuid).is_some_and(|p| p.window == event.window)) {
+            self.alice_clicked(host, event.uuid, event.slot);
+            return;
+        }
         if let Some((window, ids)) = BELL_OPEN.lock().ok().and_then(|b| b.get(&event.uuid).cloned())
             && window == event.window
         {
@@ -3142,6 +3493,11 @@ impl Hooks for Mod {
     }
 
     fn menu_closed(&self, _: &mut dyn Host, event: &mut MenuClosedEvent) {
+        if let Ok(mut a) = ALICE_OPEN.lock()
+            && a.get(&event.uuid).is_some_and(|p| p.window == event.window)
+        {
+            a.remove(&event.uuid);
+        }
         if let Ok(mut b) = BELL_OPEN.lock()
             && b.get(&event.uuid).is_some_and(|(w, _)| *w == event.window)
         {
@@ -3267,6 +3623,10 @@ impl Hooks for Mod {
         let bells: Vec<u128> = PENDING_BELL.lock().map(|mut p| std::mem::take(&mut *p)).unwrap_or_default();
         for player in bells {
             self.open_bell(host, player);
+        }
+        let alices: Vec<u128> = PENDING_ALICE.lock().map(|mut p| std::mem::take(&mut *p)).unwrap_or_default();
+        for player in alices {
+            self.open_alice(host, player);
         }
         self.send_fx(host, &players);
         // Doll screens: each viewer's client told of theirs when it changes, and when it closes.
@@ -4136,6 +4496,21 @@ mod tests {
         assert!((yaw - 90.0).abs() < 1e-3);
         let (_, pitch) = goals::yaw_pitch([0.0, 0.0, 0.0], [0.0, -5.0, 5.0]);
         assert!((pitch - 45.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn alices_panel_names_the_plain_modes() {
+        assert_eq!(doing(goals::STANDBY), "Standby");
+        assert_eq!(doing(goals::PATROL), "Patrol");
+        assert_eq!(doing(goals::FOLLOW), "Follow");
+        assert_eq!(doing(goals::RIDE), "Rideon");
+        assert_eq!(doing(goals::GIGA), "Giga quarry");
+        assert_eq!(doing(200), "Busy");
+        // The two rows of buttons don't overlap.
+        let buttons = [A_ALL, A_STANDBY, A_PATROL, A_FOLLOW, A_RIDE, A_AI_ON, A_AI_OFF, A_NONE, A_BELL, A_OPEN, A_SEND, A_REFRESH];
+        let set: std::collections::HashSet<usize> = buttons.iter().copied().collect();
+        assert_eq!(set.len(), buttons.len());
+        assert!(buttons.iter().all(|&b| b < 18) && A_CANCEL < 18);
     }
 
     #[test]

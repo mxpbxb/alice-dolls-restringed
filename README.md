@@ -33,7 +33,7 @@ Each recipe is the item in the top left, wool (Goliath: iron blocks), and a Doll
 | Yuuka | sunflower | Tills, plants and harvests, replanting; farmland trampled near her in the last five minutes she tills and plants again. |
 | Yukari | ender pearl | Follows you, her one mode, and leaves mobs and dropped items alone. She is a quarter taller than the other dolls. With [Yukari Gaps](https://github.com/mxpbxb/yukari-gaps) she is your portable gap: right-click her empty-handed for the travel screen, and she comes through after you. She is no gap to travel to |
 | Patchouli | book | A sniper: one slow, heavy orb every four seconds at hostile mobs up to 64 blocks off. She walks at two thirds of a doll's pace, and riding on your head she slows you. |
-| Alice | string | Nothing yet |
+| Alice | string | Right-click her with an empty hand for her panel: all your other dolls, wherever they are, with what each is doing, its love level and how far off it is. Tick dolls, then set them to Standby, Patrol, Follow or Rideon, turn their work AI on or off, ring them back as the bell does, open one's inventory from afar, or send their items to another doll |
 
 Fighting dolls go first for whatever is attacking them, and go for iron golems that turn on you. A Goliath under half its health hits twice
 as hard, and a hostile mob it strikes turns on it rather than on its owner. When a doll is down to
