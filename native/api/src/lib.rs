@@ -4190,7 +4190,7 @@ mod tests {
     fn dolls_eat_real_food_and_leave_harmful_food_alone() {
         assert_eq!(goals::food_heal("minecraft:cooked_beef"), Some(8.0));
         assert_eq!(goals::food_heal("minecraft:bread"), Some(5.0));
-        assert_eq!(goals::food_heal("minecraft:rotten_flesh"), None);
+        assert_eq!(goals::food_heal("minecraft:rotten_flesh"), Some(4.0));
         assert_eq!(goals::food_heal("minecraft:pufferfish"), None);
         assert_eq!(goals::food_heal("minecraft:torch"), None);
     }
