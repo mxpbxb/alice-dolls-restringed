@@ -27,12 +27,12 @@ Each recipe is the item in the top left, wool (Goliath: iron blocks), and a Doll
 | Moscow | (from Russia) | Follows the doll it is bound to and takes what it gathers |
 | Marisa | fire charge | Shoots homing stars at hostile mobs |
 | Reimu | paper | Shoots rings of homing amulets |
-| Aya | feather | Takes photos (real screenshots, from her eyes, with no HUD); punch her with an empty hand for one of you |
+| Aya | feather | Takes photos (real screenshots, from her eyes, with no HUD); punch her with an empty hand for one of you. Riding on your head she gives you Speed II, and two levels more for each other Aya riding you |
 | Wakasagi | tropical fish | Fishes; give her a fishing rod and she fishes with it and its enchantments. From love level 3 she fishes with at least Lure III and Luck of the Sea III of her own |
 | Goliath | diamond sword, iron blocks | Nearly three blocks tall: fights, knocks back, wears the armour in its first slots. Evolves into Netherite Goliath |
 | Yuuka | sunflower | Tills, plants and harvests, replanting; farmland trampled near her in the last five minutes she tills and plants again. |
 | Yukari | ender pearl | Follows you, her one mode, and leaves mobs and dropped items alone. She is a quarter taller than the other dolls. With [Yukari Gaps](https://github.com/mxpbxb/yukari-gaps) she is your portable gap: right-click her empty-handed for the travel screen, and she comes through after you. She is no gap to travel to |
-| Patchouli | book | A sniper: one slow, heavy orb every four seconds at hostile mobs up to 64 blocks off. |
+| Patchouli | book | A sniper: one slow, heavy orb every four seconds at hostile mobs up to 64 blocks off. She walks at two thirds of a doll's pace, and riding on your head she slows you. |
 | Alice | string | Nothing yet |
 
 Fighting dolls go first for whatever is attacking them, and go for iron golems that turn on you. A Goliath under half its health hits twice

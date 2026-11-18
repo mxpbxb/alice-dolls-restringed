@@ -1405,6 +1405,29 @@ const WORK_FAVOUR: u32 = 10;
 /// What a Netherite Horai earns, and all she earns by her work: five for each quarry dug to bedrock.
 const QUARRY_FAVOUR: u32 = 5;
 
+/// The highest Speed amplifier riding Ayas give (Speed X).
+const AYA_SPEED_MAX: u8 = 9;
+
+/// How many of `owner`'s Aya dolls are riding them now.
+fn riding_ayas(host: &mut dyn Host, owner: u128) -> u32 {
+    let ayas: Vec<u32> = KNOWN
+        .lock()
+        .map(|k| k.iter().filter(|(_, k)| k.owner == owner && k.doll.name == goals::AYA).map(|(id, _)| *id).collect())
+        .unwrap_or_default();
+    let mut n = 0;
+    for id in ayas {
+        let holder = Holder::Entity(id);
+        if host.entity(id).is_none() || !DOLL.has(host, holder).unwrap_or(false) {
+            continue;
+        }
+        let d = DOLL.get(host, holder).unwrap_or_default();
+        if d.enabled && d.mode == goals::RIDE && d.owner == owner {
+            n += 1;
+        }
+    }
+    n
+}
+
 /// The tag Yukari Gaps reads to know a Yukari Doll's owner: they alone use her as a gap.
 fn owner_tag(owner: u128) -> String {
     format!("alice_dolls.owner.{owner:032x}")
@@ -3552,14 +3575,19 @@ impl Hooks for Mod {
         if GRID_OPEN.lock().is_ok_and(|g| g.is_empty()) && !BAUBLE_OPEN.lock().is_ok_and(|o| o.values().any(|(d, _)| *d == id)) {
             goals::set_baubles(id, worn_names(&data.baubles));
         }
-        // Aya on her owner's head: Swiftness II while she rides.
-        if data.enabled
-            && data.mode == goals::RIDE
-            && known(id).is_some_and(|k| k.doll.name == goals::AYA)
-            && host.entity(id).is_some_and(|_| ANCHOR_TICKS.lock().is_ok_and(|t| t.get(&id).copied().unwrap_or(0) == 0))
-        {
-            let speed = NativeEffect { id: "minecraft:speed".into(), amplifier: 1, duration: 60, ambient: true, particles: false };
+        // Aya on her owner's head: two levels of Speed for each Aya riding them (two Ayas, Speed IV).
+        // Patchouli on her owner's head: Slowness while she rides.
+        let riding_name = known(id).map(|k| k.doll.name).filter(|_| data.enabled && data.mode == goals::RIDE);
+        let due_now = host.entity(id).is_some_and(|_| ANCHOR_TICKS.lock().is_ok_and(|t| t.get(&id).copied().unwrap_or(0) == 0));
+        if riding_name == Some(goals::AYA) && due_now {
+            let ayas = riding_ayas(host, data.owner).max(1);
+            let amplifier = u8::try_from(ayas * 2 - 1).unwrap_or(u8::MAX).min(AYA_SPEED_MAX);
+            let speed = NativeEffect { id: "minecraft:speed".into(), amplifier, duration: 60, ambient: true, particles: false };
             host.add_effect(data.owner, &speed);
+        }
+        if riding_name == Some(goals::PATCHOULI) && due_now {
+            let slow = NativeEffect { id: "minecraft:slowness".into(), amplifier: 0, duration: 60, ambient: true, particles: false };
+            host.add_effect(data.owner, &slow);
         }
         let viewer = OPEN.lock().ok().and_then(|o| o.iter().find(|(_, (d, _))| *d == id).map(|(p, _)| *p));
         if let Some(player) = viewer
