@@ -537,6 +537,36 @@ fn fresh_click(player: u128) -> bool {
     fresh
 }
 
+/// Touhou Items' bomb, and the limited spell card (of a few casts) a doll gives for one: a card of
+/// the character it is of. A doll whose character has no card there gives none.
+/// Arcadian Dream's bomb, or Touhou Items'.
+const BOMBS: [&str; 2] = ["arcadiandream:bomb_item", "thkaguyamod:bomb_item"];
+const STARDUST: &str = "thkaguyamod:spell_card_stardust_reverie_limited";
+const SPARK: &str = "thkaguyamod:spell_card_master_spark_limited";
+/// Arcadian Dream's 1UP.
+const EXTEND: &str = "arcadiandream:extend_item";
+fn doll_card(name: &str) -> Option<&'static str> {
+    Some(match name {
+        goals::MARISA => STARDUST,
+        goals::REIMU => "thkaguyamod:spell_card_musou_fuuin_limited",
+        goals::PATCHOULI => "thkaguyamod:spell_card_agunisyain_limited",
+        goals::YUKARI => "thkaguyamod:spell_card_mesh_light_darkness_limited",
+        goals::YUUKA => "thkaguyamod:spell_card_kachoufuugetu_limited",
+        goals::WAKASAGI => "thkaguyamod:spell_card_tail_fin_slap_limited",
+        _ => return None,
+    })
+}
+
+/// One of `item` dropped where doll `id` stands.
+fn drop_at_doll(host: &mut dyn Host, id: u32, item: &str) {
+    let Some(e) = host.entity(id) else { return };
+    let (Some(at), Some(level)) = (host.entity_position(e), host.entity_level(e)) else { return };
+    let dimension = level.dimension().to_owned();
+    let stack: Compound = [("id".into(), Tag::String(item.into())), ("count".into(), Tag::Int(1))].into();
+    let nbt: Compound = [("Item".into(), Tag::Compound(stack)), ("PickupDelay".into(), Tag::Short(10))].into();
+    host.summon(&dimension, "minecraft:item", [at[0], at[1] + 0.5, at[2]], nbt);
+}
+
 /// Hands `stacks` to `owner`: what did not fit, or everything when the owner is not here.
 fn give_to_owner(host: &mut dyn Host, owner: u128, stacks: Vec<ItemStack>) -> Vec<ItemStack> {
     if owner == 0 {
@@ -2233,6 +2263,24 @@ impl Mod {
         say(host, id, data, 1, &format!("I've become a {}!", next.name));
     }
 
+    /// Takes the card in the hand and the one in the other hand, from the player's own slots (as the
+    /// game holds them while they act); whether both were there.
+    fn trade_up(&self, host: &mut dyn Host, player: &NativeServerPlayer) -> bool {
+        if player.game_mode == 1 {
+            return host.carried_stack(-106).is_some_and(|s| s.item.as_ref() == EXTEND);
+        }
+        let card = (0..36).find(|&slot| host.carried_stack(slot).is_some_and(|s| s.item.as_ref() == STARDUST && s.count > 0));
+        let other = host.carried_stack(-106).is_some_and(|s| s.item.as_ref() == EXTEND && s.count > 0);
+        let Some(card) = card.filter(|_| other) else { return false };
+        if let Some(s) = host.carried_stack(card) {
+            s.count -= 1;
+        }
+        if let Some(s) = host.carried_stack(-106) {
+            s.count -= 1;
+        }
+        true
+    }
+
     fn interact_doll(&self, host: &mut dyn Host, id: u32, held: Option<&str>, stack: Option<&ItemStack>) -> Flow {
         let holder = Holder::Entity(id);
         if !DOLL.has(host, holder).unwrap_or(false) {
@@ -2310,6 +2358,19 @@ impl Mod {
             click(host, id);
             tell_state(id, &data);
             let _ = DOLL.set(host, holder, data);
+            return Flow::Cancel;
+        }
+        if sneaking && let Some(bomb) = held.filter(|h| BOMBS.contains(h)) && let Some(card) = doll_card(name) {
+            if player.game_mode != 1 && host.take_items(bomb, 1) != 1 {
+                return Flow::Cancel;
+            }
+            drop_at_doll(host, id, card);
+            click(host, id);
+            return Flow::Cancel;
+        }
+        if sneaking && name == goals::MARISA && held == Some(STARDUST) && self.trade_up(host, &player) {
+            drop_at_doll(host, id, SPARK);
+            click(host, id);
             return Flow::Cancel;
         }
         if sneaking {
