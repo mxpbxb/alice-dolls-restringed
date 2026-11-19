@@ -3735,7 +3735,13 @@ impl Hooks for Mod {
                 *slot = cell.take();
             }
         }
-        goals::chest_closed(id, items);
+        // The page it showed is the doll's again at once (not only once it is saved), and saved
+        // now if its level is in place, else in its own next tick.
+        goals::put_inventory(id, items.clone());
+        if goals::chest_open() == Some(id) {
+            goals::set_chest_open(None);
+        }
+        self.store_items(host, id, items, true);
     }
 
     /// The outlines of a doll's armour and shield slots, where they are empty, as vanilla draws them
