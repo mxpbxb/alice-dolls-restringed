@@ -5422,7 +5422,8 @@ pub struct MenuLayout {
     pub offset: usize,
     pub total: usize,
     pub baubles_at: Option<usize>,
-    pub moscow: bool,
+    /// What each of the doll's own slots holds of anything, when the doll sets it (Moscow's).
+    pub stack: Option<u32>,
 }
 
 fn slot_kind(layout: MenuLayout, i: usize) -> SlotKind {
@@ -5436,7 +5437,11 @@ fn slot_kind(layout: MenuLayout, i: usize) -> SlotKind {
     }
     // The doll's own slot this one shows, of all it has.
     let (n, i) = (layout.total, layout.offset + i);
-    if n <= ARMOUR_SLOTS || i >= n {
+    if i >= n {
+        // Past the doll's last slot, in the last row shown: nothing goes there.
+        return SlotKind::Filler;
+    }
+    if n <= ARMOUR_SLOTS {
         return SlotKind::Store;
     }
     if let Some(part) = (0..ARMOUR_SLOTS).find(|&p| armour_slot(n, p) == i) {
@@ -5464,12 +5469,12 @@ pub fn menu_may_pickup(player: u128, window: i32, i: usize) -> Option<bool> {
     (slot_kind(layout, i) == SlotKind::Filler).then_some(false)
 }
 
-/// How many slot `i` of that menu holds: one in an armour or shield slot, 128 in Moscow's others.
+/// How many slot `i` of that menu holds: one in an armour or shield slot, Moscow's stack in her others.
 pub fn menu_slot_max(player: u128, window: i32, i: usize) -> Option<u32> {
     let layout = *DOLL_MENUS.lock().ok()?.get(&(player, window))?;
     match slot_kind(layout, i) {
         SlotKind::Armour(_) | SlotKind::Shield | SlotKind::Bauble | SlotKind::Filler => Some(1),
-        SlotKind::Store if layout.moscow && i < layout.slots => Some(128),
+        SlotKind::Store if i < layout.slots => layout.stack,
         SlotKind::Store => None,
     }
 }

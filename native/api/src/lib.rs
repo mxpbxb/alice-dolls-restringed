@@ -37,8 +37,57 @@ const KIND: &str = "minecraft:chicken";
 const DOLL_CORE: &str = "alice_dolls:doll_core";
 /// Rung, it brings every one of its owner's dolls to them, on standby.
 const DOLL_BELL: &str = "alice_dolls:doll_bell";
-/// What a Moscow doll stacks everything to.
+/// What a Moscow doll stacks everything to when she becomes one: two more for each level after.
 const MOSCOW_STACK: u32 = 128;
+/// A Moscow doll's slots go up one a level, to this: a doll item keeps stacks over 99 in its
+/// container from `EXTRA_SLOT` on, so no doll has more slots than that.
+const MOSCOW_MAX_SLOTS: usize = EXTRA_SLOT;
+/// The most a Moscow doll stacks to, whatever her level: three 99s, all a doll item's container has
+/// room for past her slots.
+const MOSCOW_MAX_STACK: u32 = 297;
+
+/// The levels a doll has gained in her present form.
+fn levels_in_form(favour: u32, form_level: u32) -> u32 {
+    favour_level(favour).0.saturating_sub(form_level)
+}
+
+/// How many of anything a slot of a Moscow doll at this favour holds.
+fn moscow_stack(data: &DollData) -> u32 {
+    (MOSCOW_STACK + 2 * levels_in_form(data.favour, data.form_level)).min(MOSCOW_MAX_STACK)
+}
+
+/// What a slot of `name` holds of anything, when the doll sets it (only Moscow does).
+fn stack_limit(name: &str, data: &DollData) -> Option<u32> {
+    (name == goals::MOSCOW).then(|| moscow_stack(data))
+}
+
+/// How many slots `doll` has at this favour: a Moscow doll one more for each level in her form.
+fn slots_at(doll: &Doll, favour: u32, form_level: u32) -> usize {
+    if doll.name != goals::MOSCOW {
+        return doll.slots;
+    }
+    (doll.slots + levels_in_form(favour, form_level) as usize).min(MOSCOW_MAX_SLOTS)
+}
+
+fn slots_for(doll: &Doll, data: &DollData) -> usize {
+    slots_at(doll, data.favour, data.form_level)
+}
+
+/// `items` grown to `to` slots, what it wears (its last four, and the shield before them) moved to
+/// its new last ones. Whether it grew.
+fn grow_items(items: &mut Vec<Option<ItemStack>>, to: usize) -> bool {
+    let old = items.len();
+    if old >= to {
+        return false;
+    }
+    items.resize(to, None);
+    if old > goals::ARMOUR_SLOTS + 1 {
+        for k in 0..=goals::ARMOUR_SLOTS {
+            items.swap(old - 1 - k, to - 1 - k);
+        }
+    }
+    true
+}
 /// `DollBase.getSizeInventory`: one row.
 const INVENTORY: usize = 9;
 
@@ -933,12 +982,59 @@ fn split_big(items: &[Option<ItemStack>]) -> Vec<Option<ItemStack>> {
     if !extra.is_empty() {
         out.resize(EXTRA_SLOT.max(out.len()), None);
         out.extend(extra);
+        // Each big stack's own count, so it comes back to its own slot: the 99s past the slots
+        // only say how many there were of an item, not whose they were.
+        let counts: Vec<String> =
+            items.iter().enumerate().filter_map(|(i, s)| s.as_ref().filter(|s| s.count > 99).map(|s| format!("{i}={}", s.count))).collect();
+        out.resize(COUNTS_SLOT, None);
+        out.push(Some(counts_marker(&counts.join(","))));
     }
     out.truncate(256);
     out
 }
 
+/// Where a doll's saved inventory keeps the counts of its stacks over 99: past every 99 of them,
+/// short of a doll item's baubles.
+const COUNTS_SLOT: usize = BAUBLES_IN_ITEM - 1;
+
+fn counts_marker(counts: &str) -> ItemStack {
+    let mut s = ItemStack::new("minecraft:paper", 1);
+    s.extra = Some(Box::new(StackData {
+        custom_name: Some(Tag::String(format!("counts:{counts}").as_str().into())),
+        ..StackData::default()
+    }));
+    s
+}
+
+/// The counts a counts marker carries, by slot.
+fn counts_in(stack: &ItemStack) -> Option<Vec<(usize, u32)>> {
+    let Some(Tag::String(name)) = stack.extra.as_deref().and_then(|d| d.custom_name.as_ref()) else { return None };
+    let name = name.to_string_lossy();
+    let list = name.strip_prefix("counts:")?;
+    Some(
+        list.split(',')
+            .filter_map(|p| {
+                let (i, c) = p.split_once('=')?;
+                Some((i.parse().ok()?, c.parse().ok()?))
+            })
+            .collect(),
+    )
+}
+
 fn merge_big(mut items: Vec<Option<ItemStack>>) -> Vec<Option<ItemStack>> {
+    // Saved with each big stack's count: those, and the 99s past the slots are not needed.
+    if let Some(counts) = items.get(COUNTS_SLOT).and_then(Option::as_ref).and_then(counts_in) {
+        items.truncate(EXTRA_SLOT);
+        for (i, c) in counts {
+            if let Some(Some(s)) = items.get_mut(i) {
+                s.count = c;
+            }
+        }
+        while items.len() > INVENTORY && items.last().is_some_and(Option::is_none) {
+            items.pop();
+        }
+        return items;
+    }
     let extra: Vec<ItemStack> =
         if items.len() > EXTRA_SLOT { items.split_off(EXTRA_SLOT).into_iter().flatten().collect() } else { Vec::new() };
     for e in extra {
@@ -1893,7 +1989,7 @@ impl Mod {
         let mut mine = goals::inventory(to).unwrap_or_else(|| data.items.clone());
         let n = mine.len();
         let general = if n > goals::ARMOUR_SLOTS { goals::shield_slot(n) } else { n };
-        let moscow = target.name == goals::MOSCOW;
+        let stack = stack_limit(target.name, &data);
         let (mut moved, mut full) = (0, false);
         for &source in from {
             if source == to || goals::chest_open() == Some(source) {
@@ -1915,7 +2011,7 @@ impl Mod {
                 if kept {
                     continue;
                 }
-                let max = if moscow { MOSCOW_STACK } else { host.max_stack_size(&s.item).unwrap_or(64) };
+                let max = stack.unwrap_or_else(|| host.max_stack_size(&s.item).unwrap_or(64));
                 let left = store_some(&mut mine[..general], s, max);
                 full |= left > 0;
                 if left < s.count {
@@ -2254,6 +2350,15 @@ impl Mod {
         }
         say(host, id, data, 1, &format!("Love level {after}!"));
         let Some(doll) = doll_of(host, id) else { return };
+        // Moscow: a slot more, and two more to a stack. Her inventory, while it is shut.
+        if doll.name == goals::MOSCOW && goals::chest_open() != Some(id) {
+            let mut items = goals::inventory(id).unwrap_or_else(|| data.items.clone());
+            if grow_items(&mut items, slots_for(doll, data)) {
+                data.items = items;
+                goals::put_inventory(id, data.items.clone());
+            }
+            say(host, id, data, 1, &format!("{} slots, stacks of {}", data.items.len(), moscow_stack(data)));
+        }
         if after.saturating_sub(data.form_level) < LEVELS_PER_FORM {
             remember(id, doll, data);
             return;
@@ -2270,14 +2375,8 @@ impl Mod {
         let Some(entity) = host.entity(id) else { return };
         host.entity_merge_nbt(entity, [("CustomName".into(), Tag::String(next.name.into()))].into());
         data.form_level = level;
-        if data.items.len() < next.slots {
-            let old = data.items.len();
-            data.items.resize(next.slots, None);
-            if old > goals::ARMOUR_SLOTS + 1 {
-                for k in 0..=goals::ARMOUR_SLOTS {
-                    data.items.swap(old - 1 - k, next.slots - 1 - k);
-                }
-            }
+        let want = slots_for(next, data);
+        if grow_items(&mut data.items, want) {
             goals::put_inventory(id, data.items.clone());
         }
         remember(id, next, data);
@@ -2835,6 +2934,7 @@ impl Mod {
         if goals::chest_open() == Some(id) {
             return;
         }
+        let stack = moscow.then(|| moscow_stack(data));
         let Some(e) = host.entity(id) else { return };
         let (Some(a), Some(level)) = (host.entity_position(e), host.entity_level(e)) else { return };
         let dimension = level.dimension().to_owned();
@@ -2877,7 +2977,7 @@ impl Mod {
                 if kept {
                     continue;
                 }
-                let max = if moscow { MOSCOW_STACK } else { host.max_stack_size(&s.item).unwrap_or(64) };
+                let max = stack.unwrap_or_else(|| host.max_stack_size(&s.item).unwrap_or(64));
                 let left = store_some(&mut mine, s, max);
                 if left < s.count {
                     moved += 1;
@@ -2942,7 +3042,7 @@ impl Mod {
         GRID_OPEN.lock().ok().map(|mut g| g.remove(&player));
         goals::set_doll_menu(player, window, None);
         MENU_VIEWS.lock().ok().map(|mut v| v.remove(&player));
-        let total = doll_of(host, id).map_or(0, |d| d.slots).div_ceil(9);
+        let total = goals::inventory(id).map_or(0, |i| i.len()).div_ceil(9);
         if let Ok(mut s) = SCROLL.lock() {
             let top = s.get(&player).copied().unwrap_or(0) as i32 + rows;
             s.insert(player, top.clamp(0, total.saturating_sub(3) as i32) as usize);
@@ -2976,7 +3076,15 @@ impl Mod {
             return;
         }
         let mut data = DOLL.get(host, holder).unwrap_or_default();
-        let items = goals::inventory(id).unwrap_or_else(|| data.items.clone());
+        let mut items = goals::inventory(id).unwrap_or_else(|| data.items.clone());
+        // A Moscow doll short of the slots her level gives her (levelled while it was open) gets them.
+        if let Some(doll) = doll_of(host, id)
+            && grow_items(&mut items, slots_for(doll, &data))
+        {
+            data.items = items.clone();
+            goals::put_inventory(id, items.clone());
+            let _ = DOLL.set(host, holder, data.clone());
+        }
         let size = items.len();
         let name = doll_of(host, id).map_or("Doll", |d| d.name);
         let switch = has_rock_switch(name) && size <= 45;
@@ -3013,7 +3121,7 @@ impl Mod {
         goals::set_doll_menu(
             player,
             window,
-            Some(goals::MenuLayout { slots: view, offset, total: size, baubles_at: Some(view), moscow: name == goals::MOSCOW }),
+            Some(goals::MenuLayout { slots: view, offset, total: size, baubles_at: Some(view), stack: stack_limit(name, &data) }),
         );
         data.baubles = vec![None; goals::BAUBLE_SLOTS];
         goals::set_baubles(id, Vec::new());
@@ -3053,7 +3161,7 @@ impl Mod {
         let title = Text::literal(format!("{name}: baubles"));
         let Some(window) = host.open_menu_with_input(player, 3, title, bauble_block(&data.baubles), 0..goals::BAUBLE_CELLS) else { return };
         BAUBLE_OPEN.lock().ok().map(|mut o| o.insert(player, (id, window)));
-        goals::set_doll_menu(player, window, Some(goals::MenuLayout { slots: 0, offset: 0, total: 0, baubles_at: Some(0), moscow: false }));
+        goals::set_doll_menu(player, window, Some(goals::MenuLayout { slots: 0, offset: 0, total: 0, baubles_at: Some(0), stack: None }));
         data.baubles = vec![None; goals::BAUBLE_SLOTS];
         goals::set_baubles(id, Vec::new());
         if let Some(doll) = doll_of(host, id) {
@@ -3072,7 +3180,8 @@ impl Mod {
         let mut data = DOLL.get(host, holder).unwrap_or_default();
         data.items = items;
         if doll_of(host, id).is_some_and(|d| d.name == goals::MOSCOW) {
-            compact(&mut data.items, MOSCOW_STACK);
+            let max = moscow_stack(&data);
+            compact(&mut data.items, max);
             goals::put_inventory(id, data.items.clone());
         }
         if from_chest {
@@ -3138,7 +3247,7 @@ fn collect(host: &mut dyn Host, id: u32, moscow: bool, around: Option<[f64; 3]>)
         if item.stack.count == 0 || goals::is_doll_item(&item.stack.item) {
             continue;
         }
-        let max = if moscow { MOSCOW_STACK } else { host.max_stack_size(&item.stack.item).unwrap_or(64) };
+        let max = if moscow { moscow_stack(&data) } else { host.max_stack_size(&item.stack.item).unwrap_or(64) };
         if room_for(&data.items, &item.stack, max) == 0 {
             continue;
         }
@@ -3223,7 +3332,8 @@ impl Hooks for Mod {
         } else {
             event.stack.clone()
         };
-        let items = items_in(&taken, doll.slots);
+        let (favour, form_level) = favour_in(&taken);
+        let items = items_in(&taken, slots_at(doll, favour, form_level));
         let summoned = host.summon(&player.dimension, KIND, at, doll_nbt(doll));
         debug(host, &format!("  {item}: summon in {} at {at:?} -> {summoned:?}", player.dimension));
         let Some(id) = summoned else {
@@ -3238,7 +3348,6 @@ impl Hooks for Mod {
             return Flow::Cancel;
         };
         let anchor = nearest_anchor(&player.dimension, player.uuid, at);
-        let (favour, form_level) = favour_in(&taken);
         let data = DollData {
             owner: player.uuid,
             items,
@@ -3423,7 +3532,7 @@ impl Hooks for Mod {
         }
         goals::set_doll_menu(event.uuid, window, None);
         MENU_VIEWS.lock().ok().map(|mut v| v.remove(&event.uuid));
-        let size = doll_of(host, id).map_or(event.slots.len(), |d| d.slots);
+        let size = goals::inventory(id).map_or(event.slots.len(), |i| i.len());
         let (offset, view) = GRID_OPEN.lock().ok().and_then(|mut g| g.remove(&event.uuid)).unwrap_or_else(|| {
             // Its layout missing: read as the whole inventory, no grid (the doll is let go either way).
             (0, size.min(event.slots.len()))
@@ -4072,14 +4181,8 @@ impl Hooks for Mod {
             }
             // A doll saved before its inventory grew gets the rest of its slots, and what it wore
             // (its last four, and the shield before them) moves to its new last ones.
-            if data.items.len() < doll.slots {
-                let old = data.items.len();
-                data.items.resize(doll.slots, None);
-                if old > goals::ARMOUR_SLOTS + 1 && doll.slots > old {
-                    for k in 0..=goals::ARMOUR_SLOTS {
-                        data.items.swap(old - 1 - k, doll.slots - 1 - k);
-                    }
-                }
+            let want = slots_for(doll, &data);
+            if grow_items(&mut data.items, want) {
                 let _ = DOLL.set(host, holder, data.clone());
             }
             // A Goliath left riding by an older version gets down.
@@ -4557,6 +4660,72 @@ impl Hooks for Mod {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn big_stacks_saved_before_the_counts_still_read() {
+        let mut old: Vec<Option<ItemStack>> = vec![None; 54];
+        old[0] = Some(ItemStack::new("minecraft:dirt", 99));
+        old.resize(EXTRA_SLOT, None);
+        old.push(Some(ItemStack::new("minecraft:dirt", 29)));
+        let read = merge_big(old);
+        assert_eq!(read[0].as_ref().map(|s| s.count), Some(128));
+        // Two big stacks of one item each keep their own count now.
+        let mut two: Vec<Option<ItemStack>> = vec![None; 54];
+        two[3] = Some(ItemStack::new("minecraft:dirt", 128));
+        two[7] = Some(ItemStack::new("minecraft:dirt", 200));
+        two[8] = Some(ItemStack::new("minecraft:dirt", 99));
+        let mut back = merge_big(split_big(&two));
+        back.resize(two.len(), None);
+        assert_eq!(back, two);
+    }
+
+    #[test]
+    fn moscow_grows_a_slot_and_two_to_a_stack_a_level() {
+        let moscow = DOLLS.iter().find(|d| d.name == goals::MOSCOW).unwrap();
+        let russia = DOLLS.iter().find(|d| d.name == goals::RUSSIA).unwrap();
+        // The least favour for a level, from the curve itself.
+        let at = |level: u32| {
+            let (mut lo, mut hi) = (0u32, u32::MAX);
+            while lo < hi {
+                let mid = lo + (hi - lo) / 2;
+                if favour_level(mid).0 >= level { hi = mid } else { lo = mid + 1 }
+            }
+            lo
+        };
+        let (l3, l5) = (at(3), at(5));
+        assert_eq!(slots_at(moscow, l3, 3), 54);
+        assert_eq!(slots_at(moscow, l5, 3), 56);
+        assert_eq!(slots_at(russia, l5, 0), 36);
+        let data = DollData { favour: l5, form_level: 3, ..DollData::default() };
+        assert_eq!(moscow_stack(&data), 132);
+        assert_eq!(stack_limit(goals::MOSCOW, &data), Some(132));
+        assert_eq!(stack_limit(goals::RUSSIA, &data), None);
+        // Never past what a doll item can carry.
+        let far = DollData { favour: u32::MAX, form_level: 0, ..DollData::default() };
+        assert!(slots_for(moscow, &far) <= EXTRA_SLOT);
+        assert!(moscow_stack(&far) <= MOSCOW_MAX_STACK);
+    }
+
+    #[test]
+    fn growing_keeps_what_she_wears_last() {
+        let mut items: Vec<Option<ItemStack>> = vec![None; 54];
+        items[0] = Some(ItemStack::new("minecraft:dirt", 200));
+        items[53] = Some(ItemStack::new("minecraft:iron_helmet", 1));
+        items[49] = Some(ItemStack::new("minecraft:shield", 1));
+        assert!(grow_items(&mut items, 56));
+        assert_eq!(items.len(), 56);
+        assert_eq!(items[55].as_ref().map(|s| &*s.item), Some("minecraft:iron_helmet"));
+        assert_eq!(items[51].as_ref().map(|s| &*s.item), Some("minecraft:shield"));
+        assert!(items[53].is_none() && items[49].is_none());
+        assert!(!grow_items(&mut items, 56));
+        // 64 slots of the biggest stacks come back out of her item as they went in.
+        let moscow = DOLLS.iter().find(|d| d.name == goals::MOSCOW).unwrap();
+        let mut full: Vec<Option<ItemStack>> = (0..64)
+            .map(|i| Some(ItemStack::new(if i % 2 == 0 { "minecraft:dirt" } else { "minecraft:stone" }, MOSCOW_MAX_STACK)))
+            .collect();
+        full[63] = None;
+        assert_eq!(items_in(&doll_item(moscow, &full), 64), full);
+    }
 
     #[test]
     fn doll_limits() {

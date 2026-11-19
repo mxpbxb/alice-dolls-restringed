@@ -24,7 +24,7 @@ Each recipe is the item in the top left, wool (Goliath: iron blocks), and a Doll
 | Germany | golden axe | Finds trees and chops them down |
 | London | eye of ender | Reports the spawners above and below it |
 | Russia | chest | 36 slots: picks up what is dropped around it, lights dark places with torches; bound to another doll with a lead, follows it. Evolves into Moscow |
-| Moscow | (from Russia) | Follows the doll it is bound to and takes what it gathers |
+| Moscow | (from Russia) | 54 slots of 128, one slot and two to a stack more for each level after it evolves (to 64 slots). Follows the doll it is bound to and takes what it gathers |
 | Marisa | fire charge | Shoots homing stars at hostile mobs |
 | Reimu | paper | Shoots rings of homing amulets |
 | Aya | feather | Takes photos (real screenshots, from her eyes, with no HUD); punch her with an empty hand for one of you. Riding on your head she gives you Speed II, and two levels more for each other Aya riding you |
