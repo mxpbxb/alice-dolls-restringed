@@ -1523,6 +1523,7 @@ const A_NONE: usize = 8;
 const A_BELL: usize = 9 + 1;
 const A_OPEN: usize = 9 + 3;
 const A_SEND: usize = 9 + 5;
+const A_POCKET: usize = 9 + 6;
 const A_REFRESH: usize = 9 + 7;
 /// While sending: the one button, Cancel.
 const A_CANCEL: usize = 9 + 4;
@@ -1603,6 +1604,7 @@ fn alice_items(host: &mut dyn Host, player: u128, panel: &AlicePanel) -> Vec<Opt
         buttons[A_BELL] = panel_item("minecraft:bell", "Ring: bring the ticked dolls back", false);
         buttons[A_OPEN] = panel_item("minecraft:chest", "Open the first ticked doll's inventory", false);
         buttons[A_SEND] = panel_item("minecraft:hopper", "Send the ticked dolls' items to another doll", false);
+        buttons[A_POCKET] = panel_item("minecraft:bundle", "Put the ticked dolls in your inventory (any that don't fit come to you)", false);
         buttons[A_REFRESH] = panel_item("minecraft:clock", "Refresh", false);
     }
     items.extend(buttons);
@@ -1654,7 +1656,7 @@ impl Mod {
                 }
                 panel.sending = false;
             } else {
-                let needs_ticked = matches!(button, A_STANDBY | A_PATROL | A_FOLLOW | A_RIDE | A_AI_ON | A_AI_OFF | A_BELL | A_OPEN | A_SEND);
+                let needs_ticked = matches!(button, A_STANDBY | A_PATROL | A_FOLLOW | A_RIDE | A_AI_ON | A_AI_OFF | A_BELL | A_OPEN | A_SEND | A_POCKET);
                 if needs_ticked && ticked.is_empty() {
                     tell(host, "Tick some dolls first");
                     return;
@@ -1679,6 +1681,14 @@ impl Mod {
                         ALICE_OPEN.lock().ok().map(|mut a| a.remove(&player));
                         host.close_menu(player);
                         PENDING.lock().ok().map(|mut p| p.push((player, ticked[0])));
+                        return;
+                    }
+                    A_POCKET => {
+                        ALICE_OPEN.lock().ok().map(|mut a| a.remove(&player));
+                        host.close_menu(player);
+                        if let Some(p) = host.server_players().into_iter().find(|p| p.uuid == player) {
+                            self.pocket(host, &p, &ticked);
+                        }
                         return;
                     }
                     A_SEND => panel.sending = true,
@@ -1740,6 +1750,57 @@ impl Mod {
     }
 
     /// Dolls `ids` of `owner`'s turn their work AI on or off, as a Doll Core would.
+    /// Dolls `ids` of `player`'s come back as their items, with what they carry, into the player's
+    /// inventory, as a sneaking empty-handed click on each would; a doll whose item doesn't fit is
+    /// called to the player instead, as the bell calls it, so nothing is dropped.
+    fn pocket(&self, host: &mut dyn Host, player: &NativeServerPlayer, ids: &[u32]) {
+        let (mut pocketed, mut far) = (0, 0);
+        let mut called = Vec::new();
+        for &id in ids {
+            let holder = Holder::Entity(id);
+            let Some(doll) = doll_of(host, id) else { continue };
+            if !DOLL.has(host, holder).unwrap_or(false) || goals::chest_open() == Some(id) {
+                continue;
+            }
+            let data = DOLL.get(host, holder).unwrap_or_default();
+            if data.owner != player.uuid {
+                continue;
+            }
+            let Some(dimension) = host.entity(id).and_then(|e| host.entity_level(e)).map(|l| l.dimension().to_owned()) else {
+                far += 1;
+                continue;
+            };
+            let k = Known {
+                doll,
+                owner: player.uuid,
+                items: goals::inventory(id).unwrap_or_else(|| data.items.clone()),
+                baubles: data.baubles.clone(),
+                favour: data.favour,
+                form_level: data.form_level,
+            };
+            let Some(stack) = belongings(&k).into_iter().next() else { continue };
+            if host.give_stack(player.uuid, stack).is_some() {
+                called.push(id);
+                continue;
+            }
+            if data.xp > 0 {
+                host.give_experience(player.uuid, data.xp);
+            }
+            forget(id);
+            host.remove_mob(&dimension, id);
+            pocketed += 1;
+        }
+        let mut text = format!("{pocketed} {} put in your inventory", if pocketed == 1 { "doll" } else { "dolls" });
+        if !called.is_empty() {
+            text.push_str(&format!(", {} coming to you (no room)", called.len()));
+            self.recall(host, player, called);
+        }
+        if far > 0 {
+            text.push_str(&format!(", {far} too far away"));
+        }
+        host.action_bar(player.uuid, Text::literal(text));
+    }
+
     fn switch_ai(&self, host: &mut dyn Host, owner: u128, ids: &[u32], on: bool) {
         let mut done = 0;
         for &id in ids {
@@ -1889,6 +1950,10 @@ impl Mod {
     /// as if it were given them.
     fn use_points(&self, host: &mut dyn Host, id: u32, data: &mut DollData) {
         if goals::chest_open() == Some(id) {
+            return;
+        }
+        // A storage doll (Russia, Moscow) keeps the Point items it carries, for its owner to take.
+        if known(id).is_some_and(|k| k.doll.name == goals::RUSSIA || k.doll.name == goals::MOSCOW) {
             return;
         }
         let mut items = goals::inventory(id).unwrap_or_else(|| data.items.clone());
@@ -3088,6 +3153,8 @@ impl Hooks for Mod {
             anchor,
             favour,
             form_level,
+            // Alice patrols from the moment she is placed.
+            mode: if doll.name == goals::ALICE { goals::PATROL } else { goals::STANDBY },
             ..DollData::default()
         };
         goals::set_level(id, favour_level(favour).0);

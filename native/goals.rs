@@ -707,6 +707,8 @@ fn spare_owner(m: &mut Mob, w: &MobWorld) {
 
 /// The Goliath dolls about: hostile mobs may go for them.
 static GOLIATHS: LazyLock<Mutex<HashSet<u32>>> = LazyLock::new(Default::default);
+/// The form (its name) each doll's jobs were last set for.
+static GOALS_FORM: LazyLock<Mutex<HashMap<u32, String>>> = LazyLock::new(Default::default);
 
 /// The mobs a Goliath struck: which Goliath, and when it last did.
 static GOLIATH_STRUCK: LazyLock<Mutex<HashMap<u32, (u32, std::time::Instant)>>> = LazyLock::new(Default::default);
@@ -917,8 +919,14 @@ fn tick_doll(m: &mut Mob, w: &MobWorld) {
     if state.mode == RIDE && state.enabled {
         sit_on_head(m, w);
     }
-    if m.ai.goals.has("DollFollow") {
+    // Its jobs are set once for each form: a doll that evolves (a Diamond Horai into a Netherite
+    // one, a Goliath into a Netherite one) gets its new form's jobs, the quarry among them.
+    let form = m.custom_name.clone().unwrap_or_default();
+    if m.ai.goals.has("DollFollow") && GOALS_FORM.lock().is_ok_and(|f| f.get(&m.id) == Some(&form)) {
         return;
+    }
+    if let Ok(mut f) = GOALS_FORM.lock() {
+        f.insert(m.id, form);
     }
     let tier = horai_tier(m);
     let ai = &mut m.ai;
