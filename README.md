@@ -55,6 +55,9 @@ your head stays out of your view in first person and keeps its reports to itself
 protect you too (the fire bauble from lava and fire). When you respawn, the dolls that were following
 you or on your head come back to you.
 
+Each player can have one Horai out at a time (in any of its three forms), and two each of
+Patchouli, Reimu, Marisa, Yuuka and Wakasagi.
+
 ## Love
 
 Dolls eat food from their inventory to heal (rotten flesh too), and at work (on patrol, following or on your head) a
