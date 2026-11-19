@@ -8,11 +8,6 @@
           "type": "minecraft:item",
           "name": "alice_dolls:doll_anchor"
         }
-      ],
-      "conditions": [
-        {
-          "condition": "minecraft:survives_explosion"
-        }
       ]
     }
   ]

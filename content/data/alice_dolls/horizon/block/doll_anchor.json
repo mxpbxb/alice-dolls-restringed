@@ -3,7 +3,8 @@
   "properties": {
     "hardness": 2.0,
     "explosion_resistance": 3600000.0,
-    "sounds": "minecraft:iron_block"
+    "sounds": "minecraft:iron_block",
+    "requires_tool": false
   },
   "shapes": {
     "default": [
