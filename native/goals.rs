@@ -4718,7 +4718,8 @@ impl Quarry {
 /// Sneak and right-click a Horai with a golden pickaxe: the giga quarry. She digs out a 20x20
 /// pit, layer by layer, from where she stood down to bedrock, at her own pace (and the netherite
 /// one twice over, as in her quarry). She never digs a block beside lava or water, so the pit
-/// doesn't flood: those stay as walls. Again, or any other order, ends it.
+/// doesn't flood: those stay as walls. Again, or any other order, ends it. Finished or ended, she
+/// leaves a line of ladders down the pit's wall from the block she dug first.
 pub const GIGA: u8 = 6;
 /// Yuuka's other mode.
 pub const BLOOM: u8 = 7;
@@ -4774,6 +4775,34 @@ struct GigaQuarry {
     dig: Dig,
     fetch: Fetch,
     done: bool,
+    /// The pit she is digging, for its ladders once it ends.
+    site: Option<[i32; 3]>,
+}
+
+/// The ladders down a giga quarry at `site`, dug as deep as layer `bottom`: in the corner where
+/// she began, against the pit's west wall, wherever that cell is open and the wall is solid.
+fn giga_ladders(w: &MobWorld, site: [i32; 3], bottom: i32) -> Vec<(i32, horizon_world::registry::BlockStateId)> {
+    let Some(mut ladder) = w.registry.default_state("minecraft:ladder").and_then(|d| w.registry.state(d).cloned()) else {
+        return Vec::new();
+    };
+    ladder.properties.insert("facing".into(), "east".into());
+    let Ok(state) = w.registry.resolve(&ladder) else { return Vec::new() };
+    let [x, _, z] = site;
+    (bottom.max(WORLD_BOTTOM)..=site[1])
+        .rev()
+        .filter(|&y| is_air(&name_at(w, [x, y, z])) && w.facts.get(w.world.block(x - 1, y, z)).full_collision)
+        .map(|y| (y, state))
+        .collect()
+}
+
+impl GigaQuarry {
+    /// The pit's ladders, from its top layer down to the deepest she dug.
+    fn place_ladders(&self, cx: &mut Cx) {
+        let (Some(site), Some(bottom)) = (self.site, self.layer) else { return };
+        for (y, state) in giga_ladders(cx.w, site, bottom) {
+            cx.events.push(MobEvent::SetBlock { pos: [site[0], y, site[2]], state });
+        }
+    }
 }
 
 impl Goal for GigaQuarry {
@@ -4795,6 +4824,11 @@ impl Goal for GigaQuarry {
     fn stop(&mut self, m: &mut Mob, cx: &mut Cx) {
         self.dig.cancel(m, cx);
         m.no_gravity = false;
+        // Ended by another order (not just put aside for a moment): its ladders, as if finished.
+        if !in_mode(m, GIGA) && !self.done {
+            self.place_ladders(cx);
+        }
+        self.site = None;
     }
     fn every_tick(&self) -> bool {
         true
@@ -4816,6 +4850,7 @@ impl Goal for GigaQuarry {
 impl GigaQuarry {
     fn step(&mut self, m: &mut Mob, cx: &mut Cx) {
         let Some(site) = giga_site(m.id) else { return };
+        self.site = Some(site);
         if self.done {
             m.no_gravity = false;
             return;
@@ -4856,6 +4891,7 @@ impl GigaQuarry {
         let next = layer - 1;
         if next < WORLD_BOTTOM || self.hard * 2 >= (GIGA_SIZE * GIGA_SIZE) as usize {
             self.done = true;
+            self.place_ladders(cx);
             say(m.id, 1, "Giga quarry done: bedrock!");
             quarried(m.id, true);
             return;
@@ -5316,13 +5352,12 @@ pub fn shield_slot(n: usize) -> usize {
 }
 
 /// Touhou Little Maid's baubles, as this mod's items, and the Totem of Undying.
-pub const BAUBLES: [&str; 11] = [
+pub const BAUBLES: [&str; 10] = [
     "alice_dolls:fire_protect_bauble",
     "alice_dolls:explosion_protect_bauble",
     "alice_dolls:projectile_protect_bauble",
     "alice_dolls:magic_protect_bauble",
     "alice_dolls:fall_protect_bauble",
-    "alice_dolls:drown_protect_bauble",
     "alice_dolls:nimble_fabric",
     "alice_dolls:item_magnet_bauble",
     "alice_dolls:mute_bauble",

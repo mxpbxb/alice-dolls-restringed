@@ -634,7 +634,6 @@ fn bauble_guards(bauble: &str, damage_type: &str) -> bool {
         "alice_dolls:projectile_protect_bauble" => projectile,
         "alice_dolls:magic_protect_bauble" => matches!(ty, "magic" | "indirect_magic" | "wither" | "dragon_breath" | "sonic_boom"),
         "alice_dolls:fall_protect_bauble" => matches!(ty, "fall" | "stalagmite"),
-        "alice_dolls:drown_protect_bauble" => ty == "drown",
         // NimbleFabricBauble: a shot it dodges by teleporting.
         "alice_dolls:nimble_fabric" => projectile,
         _ => false,
@@ -4235,6 +4234,13 @@ impl Hooks for Mod {
         }
         if event.kind == KIND
             && u32::try_from(event.entity).ok().and_then(known).is_some_and(|k| k.doll.name == goals::GRAND_GUIGNOL)
+        {
+            return Flow::Cancel;
+        }
+        // A doll never drowns.
+        if event.kind == KIND
+            && event.damage_type.strip_prefix("minecraft:").unwrap_or(event.damage_type) == "drown"
+            && u32::try_from(event.entity).ok().and_then(known).is_some()
         {
             return Flow::Cancel;
         }

@@ -19,7 +19,7 @@ Each recipe is the item in the top left, wool (Goliath: iron blocks), and a Doll
 | Doll | Crafted with | What it does |
 |---|---|---|
 | Shanghai | golden sword | Fights hostile mobs, shears sheep, reports the mobs around it. Evolves into Goliath |
-| Horai | golden pickaxe | Finds ore (ancient debris too) and digs to it. Evolves into Diamond, then Netherite Horai, which earns no love for digging, only 5 for each quarry finished, a whole level for each giga quarry, and 10 for each diamond she digs out of either, and waits four seconds before heading off to its quarry so you can give it another order. Sneak and right-click any Horai with a golden pickaxe for the giga quarry: a 20x20 pit round where she stands, dug layer by layer down to bedrock |
+| Horai | golden pickaxe | Finds ore (ancient debris too) and digs to it. Evolves into Diamond, then Netherite Horai, which earns no love for digging, only 5 for each quarry finished, a whole level for each giga quarry, and 10 for each diamond she digs out of either, and waits four seconds before heading off to its quarry so you can give it another order. Sneak and right-click any Horai with a golden pickaxe for the giga quarry: a 20x20 pit round where she stands, dug layer by layer down to bedrock. When it is done, or you give her another order, she leaves a line of ladders down the pit's wall from the corner where she began |
 | Ooedo | TNT | Walks up to hostile mobs and explodes; no explosion hurts it |
 | Germany | golden axe | Finds trees and chops them down |
 | London | eye of ender | Reports the spawners above and below it |
@@ -65,7 +65,7 @@ eats until it is whole again earns nothing. Point and power items (dropped by
 [Touhou Mobs](https://github.com/mxpbxb/touhou-mobs), from
 [Touhou Items](https://github.com/mxpbxb/touhou-items)) earn love too: right-click to give the stack,
 sneak-click to give one. A Max Doll Point is worth four Point items. Points a doll carries in its
-inventory it takes for itself, except Russia and Moscow, which keep them for you. Russia and Moscow move twice as fast as other dolls. They go for dropped items within 20 blocks of the doll they follow, and once a second pull what your other dolls within 10 blocks carry into their own inventory: all but what a doll keeps when it empties itself into a chest. They earn 3 love for each stack they pick up, and 3
+inventory it takes for itself, except Russia and Moscow, which keep them for you. Dolls never drown. Russia and Moscow move twice as fast as other dolls. They go for dropped items within 20 blocks of the doll they follow, and once a second pull what your other dolls within 10 blocks carry into their own inventory: all but what a doll keeps when it empties itself into a chest. They earn 3 love for each stack they pick up, and 3
 for each quarter hour they follow the doll they are bound to.
 Each level takes three quarters more than the last, and gives 3 more attack and 5 more health, each
 then 10% more, and makes the working dolls faster and stronger: mining, blasting, farming and fishing.
