@@ -2398,6 +2398,23 @@ fn has_rock_switch(name: &str) -> bool {
 }
 
 /// The row under a Horai's slots: the switch in the middle, glass panes around it.
+/// Where Moscow's screen has her owner's ender chest button: the bauble rows' last cell (a pane's
+/// otherwise), which then takes no item, so a click on it reaches the mod.
+fn ender_slot(view: usize) -> usize {
+    view + goals::BAUBLE_CELLS - 1
+}
+
+/// The ender chest button.
+fn ender_button() -> Option<ItemStack> {
+    let mut s = ItemStack::new("minecraft:ender_chest", 1);
+    s.extra = Some(Box::new(StackData { custom_name: Some(Tag::String("Open your ender chest".into())), ..StackData::default() }));
+    Some(s)
+}
+
+/// Players who clicked Moscow's ender chest button, for their ender chest to open on the next
+/// server tick (in place of her screen, which saves as it closes).
+static PENDING_ENDER: Mutex<Vec<u128>> = Mutex::new(Vec::new());
+
 fn switch_row(keep: bool) -> Vec<Option<ItemStack>> {
     let named = |item: &str, text: &str| {
         let mut s = ItemStack::new(item, 1);
@@ -3266,13 +3283,18 @@ impl Mod {
         if switch {
             shown.extend(switch_row(data.keep_rock));
         }
+        // Moscow's owner gets a button for their own ender chest, in the bauble rows' last cell.
+        let ender = name == goals::MOSCOW && known(id).is_some_and(|k| k.owner == player);
+        if ender {
+            shown[ender_slot(view)] = ender_button();
+        }
         let rows = (shown.len() / 9).clamp(1, 6);
         let title = if scrolls {
             format!("{name} · rows {}-{} of {rows_total} · scroll", top + 1, top + view_rows)
         } else {
             name.to_owned()
         };
-        let input = view + goals::BAUBLE_CELLS;
+        let input = view + goals::BAUBLE_CELLS - usize::from(ender);
         let window = host.open_menu_with_input(player, rows as _, Text::literal(&title), shown, 0..input);
         debug(host, &format!("inventory {id}: open_menu_with_input({rows} rows) -> {window:?}"));
         let Some(window) = window else { return };
@@ -3875,8 +3897,18 @@ impl Hooks for Mod {
         if window != event.window {
             return;
         }
-        let Some(doll) = doll_of(host, id) else { return };
+        let Some(doll) = known(id).map(|k| k.doll).or_else(|| doll_of(host, id)) else { return };
         let Some((_, view)) = GRID_OPEN.lock().ok().and_then(|g| g.get(&event.uuid).copied()) else { return };
+        // Moscow's ender chest button: her owner's own ender chest, on the next server tick.
+        if doll.name == goals::MOSCOW && event.slot == ender_slot(view) as i32 {
+            if known(id).is_some_and(|k| k.owner == event.uuid)
+                && let Ok(mut p) = PENDING_ENDER.lock()
+                && !p.contains(&event.uuid)
+            {
+                p.push(event.uuid);
+            }
+            return;
+        }
         if !has_rock_switch(doll.name) || event.slot != switch_slot(view) as i32 {
             return;
         }
@@ -4082,6 +4114,13 @@ impl Hooks for Mod {
         let bells: Vec<u128> = PENDING_BELL.lock().map(|mut p| std::mem::take(&mut *p)).unwrap_or_default();
         for player in bells {
             self.open_bell(host, player);
+        }
+        // Moscow's ender chest button: the player's own ender chest, live, in place of her screen.
+        let enders: Vec<u128> = PENDING_ENDER.lock().map(|mut p| std::mem::take(&mut *p)).unwrap_or_default();
+        for player in enders {
+            if host.open_ender_chest(player).is_none() {
+                host.action_bar(player, Text::literal("Moscow Doll : your ender chest won't open right now"));
+            }
         }
         let alices: Vec<u128> = PENDING_ALICE.lock().map(|mut p| std::mem::take(&mut *p)).unwrap_or_default();
         for player in alices {
@@ -4922,6 +4961,19 @@ impl Hooks for Mod {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn moscows_ender_chest_button_takes_a_panes_cell_not_a_baubles() {
+        for view in [27, 36, 45] {
+            let at = ender_slot(view);
+            assert_eq!(at, view + goals::BAUBLE_CELLS - 1);
+            assert_eq!(goals::bauble_cell(at, view), Some(None));
+            // The baubles all still fit in the cells before it.
+            let worn = (0..at - view).filter(|&i| matches!(goals::bauble_cell(view + i, view), Some(Some(_)))).count();
+            assert_eq!(worn, goals::BAUBLE_SLOTS);
+        }
+        assert_eq!(ender_button().map(|s| s.item.to_string()), Some("minecraft:ender_chest".to_owned()));
+    }
 
     #[test]
     fn a_forgotten_doll_leaves_no_waiting_work() {
