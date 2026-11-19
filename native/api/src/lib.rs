@@ -580,6 +580,15 @@ fn forget(id: u32) -> Option<Known> {
     KNOWN.lock().ok()?.remove(&id)
 }
 
+/// Doll `id` is the one saved as `uuid`. An entity's id is only for one load of it: when a doll's
+/// chunk or level is loaded again it comes back under a new id, and the doll known under the id it
+/// had is this one, so that is forgotten (else it would be in the bell twice and count twice
+/// towards its owner's limits). Returns the id forgotten.
+fn claim(id: u32, uuid: u128) -> Option<u32> {
+    let old = UUIDS.lock().ok()?.insert(uuid, id).filter(|&old| old != id)?;
+    forget(old).map(|_| old)
+}
+
 // ---- Dolls in a level that isn't in place ----
 //
 // A dedicated server has one level in place at a time, and a doll in any other can't be reached
@@ -4440,6 +4449,12 @@ impl Hooks for Mod {
         if goals::inventory(id).is_none() {
             goals::put_inventory(id, data.items.clone());
         }
+        // Loaded again (its chunk or level back), a doll has a new id: the one it had goes.
+        if let Some(uuid) = host.entity(id).and_then(|e| host.entity_uuid(e))
+            && let Some(old) = claim(id, uuid)
+        {
+            debug(host, &format!("tick {id}: the doll known as {old} until it was loaded again"));
+        }
         // What it carries is saved with it every tick: a save that was missed is made up here,
         // before its level goes or the doll is picked up.
         if goals::chest_open() != Some(id)
@@ -4922,6 +4937,32 @@ impl Hooks for Mod {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_doll_loaded_again_is_one_doll() {
+        let owner = 0x00a1_1ce0_0000_0000_0000_0000_0000_0042_u128;
+        let (one, two) = (0x7777_u128 << 64 | 1, 0x7777_u128 << 64 | 2);
+        let patchouli = doll_named(goals::PATCHOULI).unwrap();
+        let data = DollData { owner, ..DollData::default() };
+        // One Patchouli, loaded three times (ids 900_101, 900_105, 900_109), and a second one.
+        remember(900_101, patchouli, &data);
+        remember(900_120, patchouli, &data);
+        assert_eq!(claim(900_101, one), None);
+        assert_eq!(claim(900_120, two), None);
+        for (id, was) in [(900_105, 900_101), (900_109, 900_105)] {
+            remember(id, patchouli, &data);
+            assert_eq!(claim(id, one), Some(was));
+            assert!(known(was).is_none());
+            assert_eq!(active_like(owner, goals::PATCHOULI), 2);
+            assert_eq!(owned_dolls(owner), vec![id, 900_120]);
+        }
+        // Its own tick again changes nothing.
+        assert_eq!(claim(900_109, one), None);
+        assert_eq!(owned_dolls(owner), vec![900_109, 900_120]);
+        forget(900_109);
+        forget(900_120);
+        assert_eq!(active_like(owner, goals::PATCHOULI), 0);
+    }
 
     #[test]
     fn a_forgotten_doll_leaves_no_waiting_work() {
