@@ -575,7 +575,82 @@ fn known(id: u32) -> Option<Known> {
 }
 
 fn forget(id: u32) -> Option<Known> {
+    LATER.lock().ok().map(|mut l| l.remove(&id));
+    SEEN.lock().ok().map(|mut s| s.remove(&id));
     KNOWN.lock().ok()?.remove(&id)
+}
+
+// ---- Dolls in a level that isn't in place ----
+//
+// A dedicated server has one level in place at a time, and a doll in any other can't be reached
+// (its entity, its data, a teleport) until its own tick puts its level in place. What is done to a
+// doll from elsewhere waits for that tick, and what the server shows of a doll is from its last.
+
+/// What a doll was, as of its own last tick.
+#[derive(Clone)]
+struct Seen {
+    dimension: String,
+    at: [f64; 3],
+    mode: u8,
+    enabled: bool,
+    when: Instant,
+}
+
+static SEEN: LazyLock<Mutex<HashMap<u32, Seen>>> = LazyLock::new(Default::default);
+/// How long a doll's last tick still says where it is.
+const SEEN_FRESH: Duration = Duration::from_secs(3);
+
+fn seen(id: u32) -> Option<Seen> {
+    SEEN.lock().ok()?.get(&id).cloned()
+}
+
+type Job = Box<dyn FnOnce(&Mod, &mut dyn Host) + Send>;
+/// Work waiting for each doll's level to be in place, in order, each with when it is given up.
+static LATER: LazyLock<Mutex<HashMap<u32, Vec<(Instant, Job)>>>> = LazyLock::new(Default::default);
+const LATER_MAX: usize = 256;
+/// How long an order or a screen waits for its doll.
+const ORDER_WAIT: Duration = Duration::from_secs(60);
+/// How long what changes a doll's things waits for it (until it is forgotten, in practice).
+const SAVE_WAIT: Duration = Duration::from_secs(7 * 24 * 3600);
+
+/// Doll `id` stands by.
+fn stand_by(host: &mut dyn Host, id: u32) {
+    let holder = Holder::Entity(id);
+    if DOLL.has(host, holder).unwrap_or(false) {
+        let mut data = DOLL.get(host, holder).unwrap_or_default();
+        data.mode = goals::STANDBY;
+        tell_state(id, &data);
+        let _ = DOLL.set(host, holder, data);
+    }
+}
+
+impl Mod {
+    /// Does `job` to doll `id` now if its level is in place and nothing waits before it for the
+    /// doll; otherwise in the doll's next tick (unless `wait` is up by then).
+    fn at_doll(&self, host: &mut dyn Host, id: u32, wait: Duration, job: Job) {
+        let queued = LATER.lock().is_ok_and(|l| l.get(&id).is_some_and(|v| !v.is_empty()));
+        if !queued && host.entity(id).is_some() {
+            job(self, host);
+            return;
+        }
+        if let Ok(mut l) = LATER.lock() {
+            let jobs = l.entry(id).or_default();
+            if jobs.len() < LATER_MAX {
+                jobs.push((Instant::now() + wait, job));
+            }
+        }
+    }
+
+    /// In doll `id`'s own tick: what waited for it.
+    fn run_later(&self, host: &mut dyn Host, id: u32) {
+        let jobs = LATER.lock().ok().and_then(|mut l| l.remove(&id)).unwrap_or_default();
+        let now = Instant::now();
+        for (until, job) in jobs {
+            if until >= now {
+                job(self, host);
+            }
+        }
+    }
 }
 
 /// One right-click reaches the game more than once: each hand asks, and a held button asks again
@@ -1587,7 +1662,7 @@ fn bell_items(host: &dyn Host, ids: &[u32], left: &std::collections::HashSet<u32
     let rows = ids.len().div_ceil(9).max(1);
     let mut items: Vec<Option<ItemStack>> = vec![None; rows * 9];
     for (k, &id) in ids.iter().enumerate() {
-        let Some(doll) = doll_of(host, id) else { continue };
+        let Some(doll) = known(id).map(|k| k.doll).or_else(|| doll_of(host, id)) else { continue };
         let coming = !left.contains(&id);
         let text = if coming { format!("[x] {} : comes", doll.name) } else { format!("[ ] {} : stays", doll.name) };
         items[k] = named(if coming { doll.item } else { "minecraft:gray_dye" }, &text);
@@ -1714,31 +1789,28 @@ fn alice_items(host: &mut dyn Host, player: u128, panel: &AlicePanel) -> Vec<Opt
     let rows = panel.ids.len().div_ceil(9).max(1);
     let mut items: Vec<Option<ItemStack>> = vec![None; rows * 9];
     for (k, &id) in panel.ids.iter().enumerate() {
-        let Some(doll) = doll_of(host, id) else { continue };
-        let holder = Holder::Entity(id);
-        if !DOLL.has(host, holder).unwrap_or(false) {
-            items[k] = panel_item("minecraft:gray_dye", &format!("{} : gone", doll.name), false);
-            continue;
-        }
-        let data = DOLL.get(host, holder).unwrap_or_default();
-        let where_ = match host.entity(id).and_then(|e| Some((host.entity_level(e)?.dimension().to_owned(), host.entity_position(e)?))) {
-            Some((dim, at)) => match &me {
-                Some(p) if p.dimension == dim => {
-                    format!("{:.0} m", (0..3).map(|i| (at[i] - p.position[i]).powi(2)).sum::<f64>().sqrt())
+        // From what the doll was in its own last tick: its level may not be in place now.
+        let Some(k_) = known(id) else { continue };
+        let doll = k_.doll;
+        let last = seen(id);
+        let where_ = match &last {
+            Some(s) if s.when.elapsed() < SEEN_FRESH => match &me {
+                Some(p) if p.dimension == s.dimension => {
+                    format!("{:.0} m", (0..3).map(|i| (s.at[i] - p.position[i]).powi(2)).sum::<f64>().sqrt())
                 }
-                _ => format!("in {}", dim.trim_start_matches("minecraft:").replace('_', " ")),
+                _ => format!("in {}", s.dimension.trim_start_matches("minecraft:").replace('_', " ")),
             },
-            None => "far away".to_owned(),
+            _ => "far away".to_owned(),
         };
         let ticked = panel.ticked.contains(&id);
         let mut text = format!(
             "{} {} · {} · Lv {} · {where_}",
             if ticked { "[x]" } else { "[ ]" },
             doll.name,
-            doing(data.mode),
-            favour_level(data.favour).0
+            last.as_ref().map_or("Not loaded", |s| doing(s.mode)),
+            favour_level(k_.favour).0
         );
-        if !data.enabled {
+        if last.as_ref().is_some_and(|s| !s.enabled) {
             text.push_str(" · AI off");
         }
         items[k] = panel_item(doll.item, &text, ticked);
@@ -1868,34 +1940,42 @@ impl Mod {
     fn order(&self, host: &mut dyn Host, owner: u128, ids: &[u32], mode: u8) {
         let (mut done, mut cannot) = (0, 0);
         for &id in ids {
-            let holder = Holder::Entity(id);
-            let Some(doll) = doll_of(host, id) else { continue };
-            if !DOLL.has(host, holder).unwrap_or(false) {
-                continue;
-            }
-            let mut data = DOLL.get(host, holder).unwrap_or_default();
-            if data.owner != owner
-                || (doll.name == goals::YUKARI && mode != goals::FOLLOW)
-                || (mode == goals::RIDE && is_goliath(doll.name))
-            {
+            let Some(k) = known(id) else { continue };
+            let doll = k.doll;
+            if k.owner != owner || (doll.name == goals::YUKARI && mode != goals::FOLLOW) || (mode == goals::RIDE && is_goliath(doll.name)) {
                 cannot += 1;
                 continue;
             }
-            if data.mode == goals::GIGA {
-                data.giga = None;
-            }
-            data.mode = mode;
-            if mode == goals::PATROL
-                && let Some(e) = host.entity(id)
-                && let (Some(at), Some(level)) = (host.entity_position(e), host.entity_level(e))
-            {
-                let dimension = level.dimension().to_owned();
-                data.anchor = nearest_anchor(&dimension, owner, at);
-            }
-            say(host, id, &data, 1, mode_name(mode));
-            click(host, id);
-            tell_state(id, &data);
-            let _ = DOLL.set(host, holder, data);
+            self.at_doll(
+                host,
+                id,
+                ORDER_WAIT,
+                Box::new(move |_: &Mod, host: &mut dyn Host| {
+                    let holder = Holder::Entity(id);
+                    if !DOLL.has(host, holder).unwrap_or(false) {
+                        return;
+                    }
+                    let mut data = DOLL.get(host, holder).unwrap_or_default();
+                    if data.owner != owner {
+                        return;
+                    }
+                    if data.mode == goals::GIGA {
+                        data.giga = None;
+                    }
+                    data.mode = mode;
+                    if mode == goals::PATROL
+                        && let Some(e) = host.entity(id)
+                        && let (Some(at), Some(level)) = (host.entity_position(e), host.entity_level(e))
+                    {
+                        let dimension = level.dimension().to_owned();
+                        data.anchor = nearest_anchor(&dimension, owner, at);
+                    }
+                    say(host, id, &data, 1, mode_name(mode));
+                    click(host, id);
+                    tell_state(id, &data);
+                    let _ = DOLL.set(host, holder, data);
+                }),
+            );
             done += 1;
         }
         let mut text = format!("{done} {}: {}", if done == 1 { "doll" } else { "dolls" }, doing(mode));
@@ -1910,49 +1990,58 @@ impl Mod {
     /// inventory, as a sneaking empty-handed click on each would; a doll whose item doesn't fit is
     /// called to the player instead, as the bell calls it, so nothing is dropped.
     fn pocket(&self, host: &mut dyn Host, player: &NativeServerPlayer, ids: &[u32]) {
-        let (mut pocketed, mut far) = (0, 0);
-        let mut called = Vec::new();
+        let (mut asked, mut waiting) = (0, 0);
         for &id in ids {
-            let holder = Holder::Entity(id);
-            let Some(doll) = doll_of(host, id) else { continue };
-            if !DOLL.has(host, holder).unwrap_or(false) || goals::chest_open() == Some(id) {
+            if known(id).is_none_or(|k| k.owner != player.uuid) || goals::chest_open() == Some(id) {
                 continue;
             }
-            let data = DOLL.get(host, holder).unwrap_or_default();
-            if data.owner != player.uuid {
-                continue;
-            }
-            let Some(dimension) = host.entity(id).and_then(|e| host.entity_level(e)).map(|l| l.dimension().to_owned()) else {
-                far += 1;
-                continue;
-            };
-            let k = Known {
-                doll,
-                owner: player.uuid,
-                items: goals::inventory(id).unwrap_or_else(|| data.items.clone()),
-                baubles: data.baubles.clone(),
-                favour: data.favour,
-                form_level: data.form_level,
-            };
-            let Some(stack) = belongings(&k).into_iter().next() else { continue };
-            if host.give_stack(player.uuid, stack).is_some() {
-                called.push(id);
-                continue;
-            }
-            if data.xp > 0 {
-                host.give_experience(player.uuid, data.xp);
-            }
-            forget(id);
-            host.remove_mob(&dimension, id);
-            pocketed += 1;
+            asked += 1;
+            waiting += usize::from(host.entity(id).is_none());
+            let (uuid, to, at) = (player.uuid, player.dimension.clone(), player.position);
+            self.at_doll(
+                host,
+                id,
+                ORDER_WAIT,
+                Box::new(move |_: &Mod, host: &mut dyn Host| {
+                    let holder = Holder::Entity(id);
+                    let Some(doll) = doll_of(host, id) else { return };
+                    if !DOLL.has(host, holder).unwrap_or(false) || goals::chest_open() == Some(id) {
+                        return;
+                    }
+                    let data = DOLL.get(host, holder).unwrap_or_default();
+                    let Some(dimension) = host.entity(id).and_then(|e| host.entity_level(e)).map(|l| l.dimension().to_owned()) else {
+                        return;
+                    };
+                    if data.owner != uuid {
+                        return;
+                    }
+                    let k = Known {
+                        doll,
+                        owner: uuid,
+                        items: goals::inventory(id).unwrap_or_else(|| data.items.clone()),
+                        baubles: data.baubles.clone(),
+                        favour: data.favour,
+                        form_level: data.form_level,
+                    };
+                    let Some(stack) = belongings(&k).into_iter().next() else { return };
+                    if host.give_stack(uuid, stack).is_some() {
+                        // No room: it comes to its owner instead, as the bell calls it.
+                        if dimension == to && host.teleport_mob(&to, id, at) {
+                            stand_by(host, id);
+                        }
+                        return;
+                    }
+                    if data.xp > 0 {
+                        host.give_experience(uuid, data.xp);
+                    }
+                    forget(id);
+                    host.remove_mob(&dimension, id);
+                }),
+            );
         }
-        let mut text = format!("{pocketed} {} put in your inventory", if pocketed == 1 { "doll" } else { "dolls" });
-        if !called.is_empty() {
-            text.push_str(&format!(", {} coming to you (no room)", called.len()));
-            self.recall(host, player, called);
-        }
-        if far > 0 {
-            text.push_str(&format!(", {far} too far away"));
+        let mut text = format!("{asked} {} to your inventory (any with no room come to you)", if asked == 1 { "doll" } else { "dolls" });
+        if waiting > 0 {
+            text.push_str(&format!(", {waiting} once loaded"));
         }
         host.action_bar(player.uuid, Text::literal(text));
     }
@@ -1960,18 +2049,28 @@ impl Mod {
     fn switch_ai(&self, host: &mut dyn Host, owner: u128, ids: &[u32], on: bool) {
         let mut done = 0;
         for &id in ids {
-            let holder = Holder::Entity(id);
-            if !DOLL.has(host, holder).unwrap_or(false) {
+            if known(id).is_none_or(|k| k.owner != owner) {
                 continue;
             }
-            let mut data = DOLL.get(host, holder).unwrap_or_default();
-            if data.owner != owner {
-                continue;
-            }
-            data.enabled = on;
-            say(host, id, &data, 1, if on { "Work AI ON" } else { "Work AI OFF" });
-            tell_state(id, &data);
-            let _ = DOLL.set(host, holder, data);
+            self.at_doll(
+                host,
+                id,
+                ORDER_WAIT,
+                Box::new(move |_: &Mod, host: &mut dyn Host| {
+                    let holder = Holder::Entity(id);
+                    if !DOLL.has(host, holder).unwrap_or(false) {
+                        return;
+                    }
+                    let mut data = DOLL.get(host, holder).unwrap_or_default();
+                    if data.owner != owner {
+                        return;
+                    }
+                    data.enabled = on;
+                    say(host, id, &data, 1, if on { "Work AI ON" } else { "Work AI OFF" });
+                    tell_state(id, &data);
+                    let _ = DOLL.set(host, holder, data);
+                }),
+            );
             done += 1;
         }
         let text = format!("{done} {}: work AI {}", if done == 1 { "doll" } else { "dolls" }, if on { "on" } else { "off" });
@@ -1983,15 +2082,18 @@ impl Mod {
     /// and any doll it carries, into `to`'s own slots (not its armour or shield). What it tells the
     /// owner.
     fn send_items(&self, host: &mut dyn Host, from: &[u32], to: u32) -> String {
-        let Some(target) = doll_of(host, to) else { return "That doll is gone".to_owned() };
+        let Some(k) = known(to) else { return "That doll is gone".to_owned() };
+        let target = k.doll;
         let holder = Holder::Entity(to);
-        if !DOLL.has(host, holder).unwrap_or(false) {
-            return format!("{} is gone", target.name);
-        }
         if goals::chest_open() == Some(to) {
             return format!("{}'s inventory is open", target.name);
         }
-        let data = DOLL.get(host, holder).unwrap_or_default();
+        // Its level may not be in place: then what it was last known to have.
+        let data = if DOLL.has(host, holder).unwrap_or(false) {
+            DOLL.get(host, holder).unwrap_or_default()
+        } else {
+            DollData { items: k.items.clone(), favour: k.favour, form_level: k.form_level, ..DollData::default() }
+        };
         let mut mine = goals::inventory(to).unwrap_or_else(|| data.items.clone());
         let n = mine.len();
         let general = if n > goals::ARMOUR_SLOTS { goals::shield_slot(n) } else { n };
@@ -2862,14 +2964,13 @@ impl Mod {
     }
 
     fn send_fx(&self, host: &mut dyn Host, players: &[NativeServerPlayer]) {
-        let ids: Vec<u32> = KNOWN.lock().map(|k| k.keys().copied().collect()).unwrap_or_default();
-        let dolls: Vec<(u32, String, [f64; 3])> = ids
-            .into_iter()
-            .filter_map(|id| {
-                let e = host.entity(id)?;
-                Some((id, host.entity_level(e)?.dimension().to_owned(), host.entity_position(e)?))
-            })
-            .collect();
+        // Where each doll was in its own last tick: at the end of the server tick its level may not
+        // be the one in place.
+        let dolls: Vec<(u32, String, [f64; 3])> = SEEN
+            .lock()
+            .map(|s| s.iter().filter(|(_, s)| s.when.elapsed() < SEEN_FRESH).map(|(id, s)| (*id, s.dimension.clone(), s.at)).collect())
+            .unwrap_or_default();
+        let _ = &host;
         let shots = goals::shots_by_doll();
         let beams = goals::beams_by_doll();
         let swings = goals::swings();
@@ -2907,28 +3008,48 @@ impl Mod {
 
     /// Dolls `ids` teleport to `player` and stand by.
     fn recall(&self, host: &mut dyn Host, player: &NativeServerPlayer, ids: Vec<u32>) {
-        let mut came = 0;
+        let (mut came, mut coming) = (0, 0);
         for (n, id) in ids.into_iter().enumerate() {
             let a = n as f64 * 2.4;
             let at = [player.position[0] + a.cos() * 0.8, player.position[1], player.position[2] + a.sin() * 0.8];
-            if !host.teleport_mob(&player.dimension, id, at) {
+            if host.entity(id).is_some() {
+                if host.teleport_mob(&player.dimension, id, at) {
+                    came += 1;
+                    stand_by(host, id);
+                }
                 continue;
             }
-            came += 1;
-            let holder = Holder::Entity(id);
-            if DOLL.has(host, holder).unwrap_or(false) {
-                let mut data = DOLL.get(host, holder).unwrap_or_default();
-                data.mode = goals::STANDBY;
-                tell_state(id, &data);
-                let _ = DOLL.set(host, holder, data);
+            // A doll whose level isn't in place comes in its own next tick, if it is in the
+            // player's dimension.
+            if seen(id).is_some_and(|s| s.dimension != player.dimension) {
+                continue;
             }
+            let to = player.dimension.clone();
+            self.at_doll(
+                host,
+                id,
+                ORDER_WAIT,
+                Box::new(move |_: &Mod, host: &mut dyn Host| {
+                    if host.teleport_mob(&to, id, at) {
+                        stand_by(host, id);
+                    }
+                }),
+            );
+            coming += 1;
         }
         player_sound(host, &player.dimension, "minecraft:block.bell.use", player.position, 1.0, 1.4);
-        let text = match came {
-            0 => "No dolls answered the bell".to_owned(),
+        let mut text = match came {
+            0 if coming == 0 => "No dolls answered the bell".to_owned(),
+            0 => String::new(),
             1 => "1 doll came back, on standby".to_owned(),
             n => format!("{n} dolls came back, on standby"),
         };
+        if coming > 0 {
+            if !text.is_empty() {
+                text.push_str(", ");
+            }
+            text.push_str(&format!("{coming} {} on the way", if coming == 1 { "doll" } else { "dolls" }));
+        }
         host.action_bar(player.uuid, Text::literal(text));
     }
 
@@ -3177,7 +3298,12 @@ impl Mod {
     }
 
     /// What a doll's inventory holds now, from the chest screen or its own goals: saved with it.
+    /// Saved in the doll's own next tick if its level isn't in place now.
     fn store_items(&self, host: &mut dyn Host, id: u32, items: Vec<Option<ItemStack>>, from_chest: bool) {
+        self.at_doll(host, id, SAVE_WAIT, Box::new(move |m: &Mod, host: &mut dyn Host| m.store_items_now(host, id, items, from_chest)));
+    }
+
+    fn store_items_now(&self, host: &mut dyn Host, id: u32, items: Vec<Option<ItemStack>>, from_chest: bool) {
         let holder = Holder::Entity(id);
         if !DOLL.has(host, holder).unwrap_or(false) {
             debug(host, &format!("inventory {id}: changed, but the doll is gone"));
@@ -3891,15 +4017,23 @@ impl Hooks for Mod {
             goals::set_owners(seen);
         }
         // The blows dolls struck at players who hurt them or their owner: the doll is the attacker.
+        // Done in the dolls' own ticks if their level isn't the one in place.
         for (hurt, rescuer) in goals::take_rescues() {
-            self.rescue(host, hurt, rescuer);
+            self.at_doll(host, hurt, Duration::from_secs(5), Box::new(move |m: &Mod, host: &mut dyn Host| m.rescue(host, hurt, rescuer)));
         }
         for (doll, foe, amount) in goals::take_player_hits() {
-            if let Some(p) = players.iter().find(|p| p.uuid == foe) {
-                if let Ok(target) = u32::try_from(p.entity_id) {
-                    host.hurt_entity(&p.dimension, target, amount, "minecraft:mob_attack", Some(doll));
-                }
-            }
+            self.at_doll(
+                host,
+                doll,
+                Duration::from_secs(2),
+                Box::new(move |_: &Mod, host: &mut dyn Host| {
+                    if let Some(p) = host.server_players().into_iter().find(|p| p.uuid == foe)
+                        && let Ok(target) = u32::try_from(p.entity_id)
+                    {
+                        host.hurt_entity(&p.dimension, target, amount, "minecraft:mob_attack", Some(doll));
+                    }
+                }),
+            );
         }
         let bells: Vec<u128> = PENDING_BELL.lock().map(|mut p| std::mem::take(&mut *p)).unwrap_or_default();
         for player in bells {
@@ -4035,13 +4169,21 @@ impl Hooks for Mod {
         {
             let _ = std::fs::write(dir.join(PLACED_FILE), text);
         }
+        // What follows is done to each doll when its level is in place: now, or in its own next tick.
         for (from, level, text) in goals::take_messages() {
-            let data = DOLL.get(host, Holder::Entity(from)).unwrap_or_default();
-            // On its owner's head, a doll keeps its reports to itself: only what must be said is.
-            if data.mode == goals::RIDE && level > 0 {
-                continue;
-            }
-            say(host, from, &data, level, &text);
+            self.at_doll(
+                host,
+                from,
+                Duration::from_secs(10),
+                Box::new(move |_: &Mod, host: &mut dyn Host| {
+                    let data = DOLL.get(host, Holder::Entity(from)).unwrap_or_default();
+                    // On its owner's head, a doll keeps its reports to itself: only what must be said is.
+                    if data.mode == goals::RIDE && level > 0 {
+                        return;
+                    }
+                    say(host, from, &data, level, &text);
+                }),
+            );
         }
         // A wheel turn on a long doll inventory: the screen closes (keeping what it showed) and opens
         // again a row further on.
@@ -4052,9 +4194,20 @@ impl Hooks for Mod {
         }
         for (player, rows) in by_player {
             if rows != 0
-                && let Some((doll, window)) = OPEN.lock().ok().and_then(|o| o.get(&player).copied())
+                && let Some((doll, _)) = OPEN.lock().ok().and_then(|o| o.get(&player).copied())
             {
-                self.scroll_inventory(host, player, doll, window, rows);
+                self.at_doll(
+                    host,
+                    doll,
+                    Duration::from_secs(5),
+                    Box::new(move |m: &Mod, host: &mut dyn Host| {
+                        if let Some((d, window)) = OPEN.lock().ok().and_then(|o| o.get(&player).copied())
+                            && d == doll
+                        {
+                            m.scroll_inventory(host, player, doll, window, rows);
+                        }
+                    }),
+                );
             }
         }
         // Every twenty jobs a doll does, it likes its owner a little more; a Netherite Horai only
@@ -4063,35 +4216,50 @@ impl Hooks for Mod {
         // A giga quarry is worth a whole level to her: the points her level takes.
         let quarried = goals::take_quarried().into_iter().filter(|&(id, _)| netherite(id)).map(|(id, giga)| (id, giga, false));
         let prizes = goals::take_prizes().into_iter().map(|id| (id, false, true));
-        for (worker, giga, prize) in quarried.chain(prizes) {
-            let holder = Holder::Entity(worker);
-            if DOLL.has(host, holder).unwrap_or(false) {
-                let mut data = DOLL.get(host, holder).unwrap_or_default();
-                let favour = if prize {
-                    PRIZE_FAVOUR
-                } else if giga {
-                    favour_level(data.favour).2
-                } else {
-                    QUARRY_FAVOUR
-                };
-                self.add_favour(host, worker, &mut data, favour);
-                let _ = DOLL.set(host, holder, data);
-            }
+        let quarried: Vec<(u32, bool, bool)> = quarried.chain(prizes).collect();
+        for (worker, giga, prize) in quarried {
+            self.at_doll(
+                host,
+                worker,
+                SAVE_WAIT,
+                Box::new(move |m: &Mod, host: &mut dyn Host| {
+                    let holder = Holder::Entity(worker);
+                    if DOLL.has(host, holder).unwrap_or(false) {
+                        let mut data = DOLL.get(host, holder).unwrap_or_default();
+                        let favour = if prize {
+                            PRIZE_FAVOUR
+                        } else if giga {
+                            favour_level(data.favour).2
+                        } else {
+                            QUARRY_FAVOUR
+                        };
+                        m.add_favour(host, worker, &mut data, favour);
+                        let _ = DOLL.set(host, holder, data);
+                    }
+                }),
+            );
         }
         for worker in goals::take_worked().into_iter().filter(|&id| !netherite(id)) {
-            let holder = Holder::Entity(worker);
-            if DOLL.has(host, holder).unwrap_or(false) {
-                let mut data = DOLL.get(host, holder).unwrap_or_default();
-                self.add_favour(host, worker, &mut data, WORK_FAVOUR);
-                let _ = DOLL.set(host, holder, data);
-            }
+            self.at_doll(
+                host,
+                worker,
+                SAVE_WAIT,
+                Box::new(move |m: &Mod, host: &mut dyn Host| {
+                    let holder = Holder::Entity(worker);
+                    if DOLL.has(host, holder).unwrap_or(false) {
+                        let mut data = DOLL.get(host, holder).unwrap_or_default();
+                        m.add_favour(host, worker, &mut data, WORK_FAVOUR);
+                        let _ = DOLL.set(host, holder, data);
+                    }
+                }),
+            );
         }
         // Reopened once the old screen has really closed (and saved what it showed).
         let waiting: Vec<(u128, u32, u8)> = REOPEN.lock().map(|mut r| std::mem::take(&mut *r)).unwrap_or_default();
         for (player, doll, tries) in waiting {
             let still_open = OPEN.lock().is_ok_and(|o| o.contains_key(&player)) || goals::chest_open().is_some();
             if !still_open {
-                self.open_inventory(host, player, doll);
+                self.at_doll(host, doll, ORDER_WAIT, Box::new(move |m: &Mod, host: &mut dyn Host| m.open_inventory(host, player, doll)));
             } else if tries < 40
                 && let Ok(mut r) = REOPEN.lock()
             {
@@ -4107,20 +4275,27 @@ impl Hooks for Mod {
         }
         let asked: Vec<(u128, u32)> = PENDING_BAUBLES.lock().map(|mut p| std::mem::take(&mut *p)).unwrap_or_default();
         for (player, doll) in asked {
-            self.open_baubles(host, player, doll);
+            self.at_doll(host, doll, ORDER_WAIT, Box::new(move |m: &Mod, host: &mut dyn Host| m.open_baubles(host, player, doll)));
         }
         let closed: Vec<(u32, Vec<Option<ItemStack>>)> = BAUBLES_CLOSED.lock().map(|mut c| std::mem::take(&mut *c)).unwrap_or_default();
         for (doll, baubles) in closed {
-            let holder = Holder::Entity(doll);
-            if DOLL.has(host, holder).unwrap_or(false) {
-                let mut data = DOLL.get(host, holder).unwrap_or_default();
-                goals::set_baubles(doll, worn_names(&baubles));
-                data.baubles = baubles;
-                if let Some(d) = doll_of(host, doll) {
-                    remember(doll, d, &data);
-                }
-                let _ = DOLL.set(host, holder, data);
-            }
+            self.at_doll(
+                host,
+                doll,
+                SAVE_WAIT,
+                Box::new(move |_: &Mod, host: &mut dyn Host| {
+                    let holder = Holder::Entity(doll);
+                    if DOLL.has(host, holder).unwrap_or(false) {
+                        let mut data = DOLL.get(host, holder).unwrap_or_default();
+                        goals::set_baubles(doll, worn_names(&baubles));
+                        data.baubles = baubles;
+                        if let Some(d) = doll_of(host, doll) {
+                            remember(doll, d, &data);
+                        }
+                        let _ = DOLL.set(host, holder, data);
+                    }
+                }),
+            );
         }
         // Wakasagi's catches, into her inventory; what doesn't fit, to her owner.
         for (doll, item) in goals::take_catches() {
@@ -4137,7 +4312,7 @@ impl Hooks for Mod {
         }
         let pending: Vec<(u128, u32)> = PENDING.lock().map(|mut p| std::mem::take(&mut *p)).unwrap_or_default();
         for (player, doll) in pending {
-            self.open_inventory(host, player, doll);
+            self.at_doll(host, doll, ORDER_WAIT, Box::new(move |m: &Mod, host: &mut dyn Host| m.open_inventory(host, player, doll)));
         }
         // What the chest menu left in a doll, and what the dolls' own jobs changed.
         let owners = goals::guarded_owners();
@@ -4148,15 +4323,22 @@ impl Hooks for Mod {
             }
         }
         for (from, at, healed, love) in goals::take_eaten() {
-            if let Some(level) = host.entity(from).and_then(|e| host.entity_level(e)) {
-                host.level_play_sound(level, "minecraft:entity.generic.eat", at, 6, 0.6, 1.3);
-            }
-            let holder = Holder::Entity(from);
-            if love && DOLL.has(host, holder).unwrap_or(false) {
-                let mut data = DOLL.get(host, holder).unwrap_or_default();
-                self.add_favour(host, from, &mut data, healed.round().max(1.0) as u32);
-                let _ = DOLL.set(host, holder, data);
-            }
+            self.at_doll(
+                host,
+                from,
+                SAVE_WAIT,
+                Box::new(move |m: &Mod, host: &mut dyn Host| {
+                    if let Some(level) = host.entity(from).and_then(|e| host.entity_level(e)) {
+                        host.level_play_sound(level, "minecraft:entity.generic.eat", at, 6, 0.6, 1.3);
+                    }
+                    let holder = Holder::Entity(from);
+                    if love && DOLL.has(host, holder).unwrap_or(false) {
+                        let mut data = DOLL.get(host, holder).unwrap_or_default();
+                        m.add_favour(host, from, &mut data, healed.round().max(1.0) as u32);
+                        let _ = DOLL.set(host, holder, data);
+                    }
+                }),
+            );
         }
         for (from, items) in goals::take_chest_closed() {
             self.store_items(host, from, items, true);
@@ -4179,6 +4361,8 @@ impl Hooks for Mod {
         if !DOLL.has(host, holder).unwrap_or(false) {
             return;
         }
+        // Its level is in place now: what waited for it.
+        self.run_later(host, id);
         let mut data = DOLL.get(host, holder).unwrap_or_default();
         if known(id).is_none_or(|k| k.owner != data.owner) {
             let Some(doll) = doll_of(host, id) else {
@@ -4213,6 +4397,12 @@ impl Hooks for Mod {
             goals::put_inventory(id, data.items.clone());
         }
         tell_state(id, &data);
+        if let Some(e) = host.entity(id)
+            && let (Some(at), Some(level)) = (host.entity_position(e), host.entity_level(e))
+        {
+            let dimension = level.dimension().to_owned();
+            SEEN.lock().ok().map(|mut s| s.insert(id, Seen { dimension, at, mode: data.mode, enabled: data.enabled, when: Instant::now() }));
+        }
         let (level, into, need) = favour_level(data.favour);
         goals::set_level(id, level);
         if let Ok(mut shown) = FAVOUR_SHOWN.lock() {
@@ -4672,6 +4862,16 @@ impl Hooks for Mod {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_forgotten_doll_leaves_no_waiting_work() {
+        let id = 900_077;
+        SEEN.lock().unwrap().insert(id, Seen { dimension: "minecraft:overworld".into(), at: [0.0; 3], mode: 0, enabled: true, when: Instant::now() });
+        LATER.lock().unwrap().entry(id).or_default().push((Instant::now() + ORDER_WAIT, Box::new(|_: &Mod, _: &mut dyn Host| {})));
+        forget(id);
+        assert!(seen(id).is_none());
+        assert!(!LATER.lock().unwrap().contains_key(&id));
+    }
 
     #[test]
     fn big_stacks_saved_before_the_counts_still_read() {
