@@ -398,6 +398,12 @@ fn decode(tag: &Compound) -> Result<DollData, AttachmentError> {
     Ok(data)
 }
 
+/// The point nearest `at`.
+fn nearest_point(at: [f64; 3], points: impl IntoIterator<Item = [f64; 3]>) -> Option<[f64; 3]> {
+    let d2 = |p: &[f64; 3]| (0..3).map(|i| (p[i] - at[i]).powi(2)).sum::<f64>();
+    points.into_iter().min_by(|a, b| d2(a).total_cmp(&d2(b)))
+}
+
 /// How far round a doll it draws experience orbs in.
 const XP_REACH: f64 = 4.0;
 
@@ -3273,7 +3279,13 @@ fn collect(host: &mut dyn Host, id: u32, moscow: bool, around: Option<[f64; 3]>)
             nearest = Some((d2, d));
         }
     }
-    goals::set_item_target(id, nearest.map(|(_, d)| d));
+    // With nothing to fetch, the nearest experience orb: it walks over, and takes it in once it is
+    // within reach (`absorb_xp`).
+    let target = nearest.map(|(_, d)| d).or_else(|| {
+        let orbs = host.experience_orbs(dimension, [at[0] - 16.0, at[1] - 8.0, at[2] - 16.0], [at[0] + 16.0, at[1] + 8.0, at[2] + 16.0]);
+        nearest_point(at, orbs.iter().map(|o| o.position))
+    });
+    goals::set_item_target(id, target);
     if taken.is_empty() {
         return 0;
     }
@@ -4725,6 +4737,13 @@ mod tests {
             .collect();
         full[63] = None;
         assert_eq!(items_in(&doll_item(moscow, &full), 64), full);
+    }
+
+    #[test]
+    fn dolls_go_for_the_nearest_orb() {
+        let at = [0.0, 64.0, 0.0];
+        assert_eq!(nearest_point(at, []), None);
+        assert_eq!(nearest_point(at, [[10.0, 64.0, 0.0], [-3.0, 65.0, 2.0], [0.0, 70.0, 9.0]]), Some([-3.0, 65.0, 2.0]));
     }
 
     #[test]
