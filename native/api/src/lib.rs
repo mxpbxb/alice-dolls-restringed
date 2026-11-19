@@ -3197,6 +3197,7 @@ impl Hooks for Mod {
         };
         if let Some((label, max)) = doll_limit(doll.name)
             && active_like(player.uuid, doll.name) >= max
+            && !host.carried_stack(-106).is_some_and(|s| s.item.as_ref() == "minecraft:wooden_axe" && s.count > 0)
         {
             let text = format!("{label} : you can only have {max} out at once");
             host.action_bar(player.uuid, Text::literal(text));
