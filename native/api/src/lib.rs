@@ -705,6 +705,33 @@ fn give_to_owner(host: &mut dyn Host, owner: u128, stacks: Vec<ItemStack>) -> Ve
     stacks.into_iter().filter_map(|stack| host.give_stack(owner, stack)).collect()
 }
 
+/// `stacks` on the ground at `at`, whole (a doll item with all it holds): a stand-in item is
+/// summoned and given each stack. What couldn't be dropped comes back.
+fn drop_stacks(host: &mut dyn Host, dimension: &str, at: [f64; 3], stacks: Vec<ItemStack>) -> Vec<ItemStack> {
+    let mut left = Vec::new();
+    for stack in stacks {
+        let item: Compound = [("id".into(), Tag::String((&*stack.item).into())), ("count".into(), Tag::Int(1))].into();
+        let nbt: Compound = [("Item".into(), Tag::Compound(item)), ("PickupDelay".into(), Tag::Short(10))].into();
+        match host.summon(dimension, "minecraft:item", [at[0], at[1] + 0.5, at[2]], nbt) {
+            Some(e) if host.set_item_entity(dimension, e, stack.clone()) => {}
+            _ => left.push(stack),
+        }
+    }
+    left
+}
+
+/// Hands `stacks` to `player`; what doesn't fit (or can't be given now) drops at their feet.
+fn give_or_drop(host: &mut dyn Host, player: &NativeServerPlayer, stacks: Vec<ItemStack>) {
+    let left = give_to_owner(host, player.uuid, stacks);
+    if left.is_empty() {
+        return;
+    }
+    let lost = drop_stacks(host, &player.dimension, player.position, left);
+    if !lost.is_empty() {
+        debug(host, &format!("could neither give nor drop {} stacks: {:?}", lost.len(), lost.iter().map(|s| &s.item).collect::<Vec<_>>()));
+    }
+}
+
 /// A gone doll's item, for its owner: it carries the doll's inventory as a shulker box does.
 fn belongings(k: &Known) -> Vec<ItemStack> {
     let mut item = doll_item(k.doll, &k.items);
@@ -2645,7 +2672,7 @@ impl Mod {
                     favour: data.favour,
                     form_level: data.form_level,
                 };
-                give_to_owner(host, player.uuid, belongings(&k));
+                give_or_drop(host, &player, belongings(&k));
             }
             return Flow::Cancel;
         }
@@ -2776,6 +2803,8 @@ impl Mod {
             for left in give_to_owner(host, player.uuid, vec![old]) {
                 if let Some(slot) = items.iter_mut().find(|s| s.is_none()) {
                     *slot = Some(left);
+                } else {
+                    give_or_drop(host, player, vec![left]);
                 }
             }
         }
@@ -2812,7 +2841,7 @@ impl Mod {
         let mut new = rod.clone();
         new.count = 1;
         if let Some(old) = items[at].replace(new) {
-            give_to_owner(host, player.uuid, vec![old]);
+            give_or_drop(host, player, vec![old]);
         }
         say(host, id, data, 1, "I'll fish with this one");
         if let Some(at) = host.entity(id).and_then(|e| host.entity_position(e)) {
@@ -3176,6 +3205,11 @@ impl Mod {
         }
         debug(host, &format!("inventory {id}: scrolled {rows} (window {window} saved)"));
         self.open_inventory(host, player, id);
+        if OPEN.lock().is_ok_and(|o| !o.contains_key(&player)) {
+            // Not opened again: the old screen, saved already, mustn't stay open to take more.
+            debug(host, &format!("inventory {id}: not reopened after the scroll; old screen closed"));
+            host.close_menu(player);
+        }
     }
 
     fn open_inventory(&self, host: &mut dyn Host, player: u128, id: u32) {
@@ -3371,6 +3405,10 @@ fn collect(host: &mut dyn Host, id: u32, moscow: bool, around: Option<[f64; 3]>)
     }
     let holder = Holder::Entity(id);
     let mut data = DOLL.get(host, holder).unwrap_or_default();
+    // What it carries now, not what was last saved: a save behind it would lose all since.
+    if let Some(live) = goals::inventory(id) {
+        data.items = live;
+    }
     // While its owner has it open, what Russia carries is the chest screen's.
     let can_take = goals::chest_open() != Some(id);
     let mut taken = Vec::new();
@@ -3479,7 +3517,7 @@ impl Hooks for Mod {
                 // Back where it came from, which it has just left room in.
                 let mut back = taken.clone();
                 back.count = 1;
-                give_to_owner(host, player.uuid, vec![back]);
+                give_or_drop(host, &player, vec![back]);
             }
             let text = format!("{} : there is no room here", doll.name);
             host.action_bar(player.uuid, Text::literal(text));
@@ -3981,7 +4019,7 @@ impl Hooks for Mod {
             favour: data.favour,
             form_level: data.form_level,
         };
-        give_to_owner(host, player.uuid, belongings(&k));
+        give_or_drop(host, &player, belongings(&k));
         Flow::Cancel
     }
 
@@ -4396,6 +4434,18 @@ impl Hooks for Mod {
         if goals::inventory(id).is_none() {
             goals::put_inventory(id, data.items.clone());
         }
+        // What it carries is saved with it every tick: a save that was missed is made up here,
+        // before its level goes or the doll is picked up.
+        if goals::chest_open() != Some(id)
+            && let Some(live) = goals::inventory(id)
+            && live != data.items
+        {
+            data.items = live;
+            if let Some(doll) = doll_of(host, id) {
+                remember(id, doll, &data);
+            }
+            let _ = DOLL.set(host, holder, data.clone());
+        }
         tell_state(id, &data);
         if let Some(e) = host.entity(id)
             && let (Some(at), Some(level)) = (host.entity_position(e), host.entity_level(e))
@@ -4576,7 +4626,11 @@ impl Hooks for Mod {
         let Some((id, KIND)) = event.context.entity else {
             return;
         };
-        if let Some(k) = forget(id) {
+        if let Some(mut k) = forget(id) {
+            // What it carried when it died, not what was last saved.
+            if let Some(live) = goals::inventory(id) {
+                k.items = live;
+            }
             event.drops.clear();
             let left = give_to_owner(host, k.owner, belongings(&k));
             event.drops.extend(left);
