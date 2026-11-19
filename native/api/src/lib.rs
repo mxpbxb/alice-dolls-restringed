@@ -1498,6 +1498,31 @@ fn bell_items(host: &dyn Host, ids: &[u32], left: &std::collections::HashSet<u32
     items
 }
 /// `owner`'s dolls in the world, in a steady order.
+/// How many of a doll (a Horai counting all three forms as one) one owner may have out at once,
+/// if there is a limit: one Horai, two each of Patchouli, Reimu, Marisa, Yuuka and Wakasagi.
+fn doll_limit(name: &str) -> Option<(&'static str, usize)> {
+    if is_horai(name) {
+        return Some(("Horai Doll", 1));
+    }
+    [goals::PATCHOULI, goals::REIMU, goals::MARISA, goals::YUUKA, goals::WAKASAGI]
+        .into_iter()
+        .find(|n| *n == name)
+        .map(|n| (n, 2))
+}
+
+/// The same limited doll as `name`: any Horai for a Horai, otherwise the same doll.
+fn same_limited(a: &str, b: &str) -> bool {
+    a == b || (is_horai(a) && is_horai(b))
+}
+
+/// How many dolls like `name` the owner has out.
+fn active_like(owner: u128, name: &str) -> usize {
+    KNOWN
+        .lock()
+        .map(|k| k.values().filter(|k| k.owner == owner && same_limited(k.doll.name, name)).count())
+        .unwrap_or(0)
+}
+
 fn owned_dolls(owner: u128) -> Vec<u32> {
     let mut ids: Vec<u32> = KNOWN
         .lock()
@@ -3170,6 +3195,13 @@ impl Hooks for Mod {
             debug(host, &format!("  {item}: no acting player"));
             return Flow::Continue;
         };
+        if let Some((label, max)) = doll_limit(doll.name)
+            && active_like(player.uuid, doll.name) >= max
+        {
+            let text = format!("{label} : you can only have {max} out at once");
+            host.action_bar(player.uuid, Text::literal(text));
+            return Flow::Cancel;
+        }
         let at = [
             f64::from(event.pos[0] + event.face[0]) + 0.5,
             f64::from(event.pos[1] + event.face[1]),
@@ -4524,6 +4556,24 @@ impl Hooks for Mod {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn doll_limits() {
+        assert_eq!(doll_limit(goals::DIAMOND_HORAI), Some(("Horai Doll", 1)));
+        assert_eq!(doll_limit(goals::MARISA).map(|l| l.1), Some(2));
+        assert_eq!(doll_limit(goals::WAKASAGI).map(|l| l.1), Some(2));
+        assert_eq!(doll_limit(goals::SHANGHAI), None);
+        assert!(same_limited(goals::HORAI, goals::NETHERITE_HORAI));
+        assert!(!same_limited(goals::REIMU, goals::MARISA));
+        let owner = 0x5eed_u128;
+        let horai = DOLLS.iter().find(|d| d.name == goals::NETHERITE_HORAI).unwrap();
+        let data = DollData { owner, ..DollData::default() };
+        remember(900_001, horai, &data);
+        assert_eq!(active_like(owner, goals::HORAI), 1);
+        assert_eq!(active_like(owner + 1, goals::HORAI), 0);
+        forget(900_001);
+        assert_eq!(active_like(owner, goals::HORAI), 0);
+    }
 
     #[test]
     fn a_dolls_data_survives_saving() {
