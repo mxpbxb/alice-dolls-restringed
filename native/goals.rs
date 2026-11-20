@@ -3173,6 +3173,11 @@ struct Snipe {
     last_scan: i64,
 }
 
+/// What Patchouli's orb does to `target`: nothing to any doll, whoever's.
+pub fn orb_damage(target: u32, damage: f32) -> f32 {
+    if is_doll(target) { 0.0 } else { damage }
+}
+
 /// Whether `a` is within `range` of `b`.
 fn snipe_reach(a: [f64; 3], b: [f64; 3], range: f64) -> bool {
     (0..3).map(|i| (a[i] - b[i]).powi(2)).sum::<f64>() <= range * range
@@ -3271,9 +3276,14 @@ impl Snipe {
                 if len <= ORB_SPEED + 0.5 {
                     match orb.mark {
                         // DamageSource.causePlayerDamage(owner): the kill is the owner's.
+                        // Never a doll, whoever's, even one it was not meant for.
                         Mark::Mob(target) => {
-                            cx.events.push(MobEvent::AttackMob { target, amount: orb.damage, source: Damage::player(here(m)) });
-                            worked(m.id);
+                            let doll = cx.w.seen(target).is_some_and(|s| s.species == Species::Chicken);
+                            let amount = if doll { 0.0 } else { orb_damage(target, orb.damage) };
+                            if amount > 0.0 {
+                                cx.events.push(MobEvent::AttackMob { target, amount, source: Damage::player(here(m)) });
+                                worked(m.id);
+                            }
                         }
                         Mark::Player(p) => hit_player(m.id, p, orb.damage),
                     }

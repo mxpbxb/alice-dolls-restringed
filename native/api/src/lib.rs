@@ -1768,7 +1768,7 @@ fn bell_items(host: &dyn Host, ids: &[u32], left: &std::collections::HashSet<u32
     for (k, &id) in ids.iter().enumerate() {
         let Some(doll) = known(id).map(|k| k.doll).or_else(|| doll_of(host, id)) else { continue };
         let coming = !left.contains(&id);
-        let text = if coming { format!("[x] {} : comes", doll.name) } else { format!("[ ] {} : stays", doll.name) };
+        let text = if coming { format!("[x] {} : comes (shift-click: off the bell)", doll.name) } else { format!("[ ] {} : stays (shift-click: off the bell)", doll.name) };
         items[k] = named(if coming { doll.item } else { "minecraft:gray_dye" }, &text);
     }
     let mut row = vec![named("minecraft:gray_stained_glass_pane", " "); 9];
@@ -1814,6 +1814,8 @@ fn owned_dolls(owner: u128) -> Vec<u32> {
 }
 
 const BELL_ALL: usize = 2;
+/// `ClickType.QUICK_MOVE`: a shift-click.
+const SHIFT_CLICK: i32 = 1;
 const BELL_RING: usize = 4;
 const BELL_NONE: usize = 6;
 
@@ -3033,9 +3035,20 @@ impl Mod {
     }
 
     /// A click in the bell picker: a doll ticked or not, all or none, or the bell rung.
-    fn bell_clicked(&self, host: &mut dyn Host, player: u128, ids: &[u32], slot: i32) {
+    fn bell_clicked(&self, host: &mut dyn Host, player: u128, ids: &[u32], slot: i32, mode: i32) {
         let Ok(slot) = usize::try_from(slot) else { return };
         let buttons = ids.len().div_ceil(9).max(1) * 9;
+        // Shift-click: the doll comes off the bell. One that is still about is back on it with its
+        // next tick, so only a doll that is gone for good (dead, or lost) stays off.
+        if mode == SHIFT_CLICK && slot < ids.len() {
+            let id = ids[slot];
+            if known(id).is_some_and(|k| k.owner == player) {
+                forget(id);
+            }
+            BELL_LEFT.lock().ok().map(|mut l| l.get_mut(&player).map(|left| left.remove(&id)));
+            self.open_bell(host, player);
+            return;
+        }
         {
             let Ok(mut all) = BELL_LEFT.lock() else { return };
             let left = all.entry(player).or_default();
@@ -3932,7 +3945,7 @@ impl Hooks for Mod {
         if let Some((window, ids)) = BELL_OPEN.lock().ok().and_then(|b| b.get(&event.uuid).cloned())
             && window == event.window
         {
-            self.bell_clicked(host, event.uuid, &ids, event.slot);
+            self.bell_clicked(host, event.uuid, &ids, event.slot, event.mode);
             return;
         }
         if let Some((doll, window, players)) = PICKING.lock().ok().and_then(|p| p.get(&event.uuid).cloned())
@@ -5025,6 +5038,16 @@ impl Hooks for Mod {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn patchoulis_orb_hurts_no_doll() {
+        let (mine, theirs, mob) = (900_301, 900_302, 900_399);
+        goals::set_state(mine, goals::PATROL, true, 1);
+        goals::set_state(theirs, goals::PATROL, true, 2);
+        assert_eq!(goals::orb_damage(mine, 40.0), 0.0);
+        assert_eq!(goals::orb_damage(theirs, 40.0), 0.0);
+        assert_eq!(goals::orb_damage(mob, 40.0), 40.0);
+    }
 
     #[test]
     fn a_doll_is_one_doll_by_its_own_id() {
