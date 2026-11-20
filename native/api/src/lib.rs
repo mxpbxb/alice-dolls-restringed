@@ -281,6 +281,9 @@ struct DollData {
     form_level: u32,
     /// A Horai's giga quarry: its corner (least x and z) and top layer, while she digs it.
     giga: Option<[i32; 3]>,
+    /// This doll's own id, saved with it and new each time a doll is placed: however often it is
+    /// loaded again (under a new entity id), it is known as one doll by this. 0 until it is given one.
+    tag: u64,
 }
 
 impl Default for DollData {
@@ -299,8 +302,17 @@ impl Default for DollData {
             form_level: 0,
             anchor: None,
             giga: None,
+            tag: 0,
         }
     }
+}
+
+/// A new doll id: random, never 0.
+fn new_tag() -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+    h.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos()));
+    h.finish().max(1)
 }
 
 fn encode(data: &DollData) -> Result<Compound, AttachmentError> {
@@ -331,6 +343,9 @@ fn encode(data: &DollData) -> Result<Compound, AttachmentError> {
     }
     if let Some(g) = data.giga {
         tag.insert("giga".into(), Tag::IntArray(g.to_vec()));
+    }
+    if data.tag != 0 {
+        tag.insert("doll_id".into(), Tag::Long(data.tag as i64));
     }
     Ok(tag)
 }
@@ -393,6 +408,7 @@ fn decode(tag: &Compound) -> Result<DollData, AttachmentError> {
             Some(Tag::IntArray(v)) if v.len() == 3 => Some([v[0], v[1], v[2]]),
             _ => None,
         },
+        tag: long("doll_id").unwrap_or(0),
     };
     fit_baubles(&mut data);
     Ok(data)
@@ -577,7 +593,59 @@ fn known(id: u32) -> Option<Known> {
 fn forget(id: u32) -> Option<Known> {
     LATER.lock().ok().map(|mut l| l.remove(&id));
     SEEN.lock().ok().map(|mut s| s.remove(&id));
+    TAGS.lock().ok().map(|mut t| t.remove(&id));
     KNOWN.lock().ok()?.remove(&id)
+}
+
+/// Each known doll's own id (`DollData::tag`), from its ticks.
+static TAGS: LazyLock<Mutex<HashMap<u32, u64>>> = LazyLock::new(Default::default);
+
+/// Doll `id` is the doll with its own id `tag`: any doll known under another entity id with that id
+/// is this one from an earlier load, and is forgotten. Returns the entity ids forgotten.
+fn claim_tag(id: u32, tag: u64) -> Vec<u32> {
+    let stale: Vec<u32> = match TAGS.lock() {
+        Ok(mut t) => {
+            t.insert(id, tag);
+            t.iter().filter(|&(&other, &was)| other != id && was == tag).map(|(&other, _)| other).collect()
+        }
+        Err(_) => return Vec::new(),
+    };
+    for &other in &stale {
+        forget(other);
+    }
+    stale
+}
+
+/// Dolls that died: the death's own drops (only the chicken's) are cleared.
+static DIED: LazyLock<Mutex<std::collections::HashSet<u32>>> = LazyLock::new(Default::default);
+
+/// Doll `id` dies, whatever killed it (a mob, another doll, the void): its item and all it carried
+/// go to its owner, or drop where it fell when they can't take them, and it is forgotten, with any
+/// entry for it from an earlier load.
+fn doll_dies(host: &mut dyn Host, id: u32) -> Flow {
+    let place = host.entity(id).and_then(|e| Some((host.entity_level(e)?.dimension().to_owned(), host.entity_position(e)?)));
+    let tag = TAGS.lock().ok().and_then(|t| t.get(&id).copied());
+    let saved = || -> Option<Known> {
+        let doll = doll_of(host, id)?;
+        let d = DOLL.get(host, Holder::Entity(id)).into_iter().next()?;
+        Some(Known { doll, owner: d.owner, items: d.items, baubles: d.baubles, favour: d.favour, form_level: d.form_level })
+    };
+    let Some(mut k) = forget(id).or_else(saved) else { return Flow::Continue };
+    if let Some(live) = goals::inventory(id) {
+        k.items = live;
+    }
+    if let Some(tag) = tag {
+        let copies: Vec<u32> = TAGS.lock().map(|t| t.iter().filter(|&(_, &g)| g == tag).map(|(&o, _)| o).collect()).unwrap_or_default();
+        for other in copies {
+            forget(other);
+        }
+    }
+    DIED.lock().ok().map(|mut d| d.insert(id));
+    let left = give_to_owner(host, k.owner, belongings(&k));
+    if let Some((dimension, at)) = place {
+        let _ = drop_stacks(host, &dimension, at, left);
+    }
+    Flow::Continue
 }
 
 /// Doll `id` is the one saved as `uuid`. An entity's id is only for one load of it: when a doll's
@@ -3542,6 +3610,7 @@ impl Hooks for Mod {
             form_level,
             // Alice patrols from the moment she is placed.
             mode: if doll.name == goals::ALICE { goals::PATROL } else { goals::STANDBY },
+            tag: new_tag(),
             ..DollData::default()
         };
         goals::set_level(id, favour_level(favour).0);
@@ -4406,6 +4475,10 @@ impl Hooks for Mod {
         if let Some(id) = done {
             set_glowing(host, id, false);
         }
+        // A broom (Magic Brooms) is a player's mount: no doll shoots it.
+        if event.kind.starts_with("horizon_magic_brooms:") {
+            goals::spare_mount(event.entity);
+        }
         if event.kind != KIND {
             return;
         }
@@ -4453,6 +4526,14 @@ impl Hooks for Mod {
         if let Some(uuid) = host.entity(id).and_then(|e| host.entity_uuid(e))
             && let Some(old) = claim(id, uuid)
         {
+            debug(host, &format!("tick {id}: the doll known as {old} until it was loaded again"));
+        }
+        // And by its own id, saved with it, whatever its entity's UUID says.
+        if data.tag == 0 {
+            data.tag = new_tag();
+            let _ = DOLL.set(host, holder, data.clone());
+        }
+        for old in claim_tag(id, data.tag) {
             debug(host, &format!("tick {id}: the doll known as {old} until it was loaded again"));
         }
         // What it carries is saved with it every tick: a save that was missed is made up here,
@@ -4647,6 +4728,10 @@ impl Hooks for Mod {
         let Some((id, KIND)) = event.context.entity else {
             return;
         };
+        if DIED.lock().is_ok_and(|mut d| d.remove(&id)) {
+            event.drops.clear();
+            return;
+        }
         if let Some(mut k) = forget(id) {
             // What it carried when it died, not what was last saved.
             if let Some(live) = goals::inventory(id) {
@@ -4826,8 +4911,11 @@ impl Hooks for Mod {
             host.set_mob_health(&dimension, id, HEALTH);
             return Flow::Cancel;
         }
-        if event.kind != KIND || known(id).is_none() || matches!(event.damage_type, "minecraft:out_of_world" | "minecraft:generic_kill") {
+        if event.kind != KIND || (known(id).is_none() && doll_of(host, id).is_none()) {
             return Flow::Continue;
+        }
+        if matches!(event.damage_type, "minecraft:out_of_world" | "minecraft:generic_kill") {
+            return doll_dies(host, id);
         }
         let worn = goals::baubles(id);
         let Some(bauble) = worn
@@ -4835,19 +4923,19 @@ impl Hooks for Mod {
             .find(|b| matches!(&***b, "alice_dolls:ultramarine_orb_elixir" | "minecraft:totem_of_undying"))
             .cloned()
         else {
-            return Flow::Continue;
+            return doll_dies(host, id);
         };
         let health = match &*bauble {
             "alice_dolls:ultramarine_orb_elixir" => doll_of(host, id).map_or(HEALTH, health_of),
             // Vanilla's totem leaves one health and regeneration; a doll, with no effects to take, gets a third.
             "minecraft:totem_of_undying" => doll_of(host, id).map_or(HEALTH, health_of) / 3.0,
-            _ => return Flow::Continue,
+            _ => return doll_dies(host, id),
         };
         let Some(dimension) = host.entity(id).and_then(|e| host.entity_level(e)).map(|l| l.dimension().to_owned()) else {
-            return Flow::Continue;
+            return doll_dies(host, id);
         };
         if !host.set_mob_health(&dimension, id, health) {
-            return Flow::Continue;
+            return doll_dies(host, id);
         }
         // The one used is taken out of its grid.
         let holder = Holder::Entity(id);
@@ -4937,6 +5025,40 @@ impl Hooks for Mod {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_doll_is_one_doll_by_its_own_id() {
+        let owner = 0x00a1_1ce0_0000_0000_0000_0000_0000_0043_u128;
+        let shanghai = doll_named(goals::SHANGHAI).unwrap();
+        let data = DollData { owner, ..DollData::default() };
+        let (one, two) = (new_tag(), new_tag());
+        assert!(one != two && one != 0 && two != 0);
+        // One Shanghai loaded four times, its UUID no help, and a second Shanghai.
+        for id in [900_201, 900_202, 900_203, 900_204, 900_210] {
+            remember(id, shanghai, &data);
+        }
+        for id in [900_201, 900_202, 900_203] {
+            TAGS.lock().unwrap().insert(id, one);
+        }
+        assert_eq!(claim_tag(900_210, two), Vec::<u32>::new());
+        let mut gone = claim_tag(900_204, one);
+        gone.sort_unstable();
+        assert_eq!(gone, vec![900_201, 900_202, 900_203]);
+        assert_eq!(owned_dolls(owner), vec![900_204, 900_210]);
+        assert_eq!(claim_tag(900_204, one), Vec::<u32>::new());
+        forget(900_204);
+        forget(900_210);
+        assert!(owned_dolls(owner).is_empty());
+    }
+
+    #[test]
+    fn a_dolls_own_id_is_saved_with_it() {
+        let data = DollData { owner: 5, tag: 0x1234_5678_9abc_def0, ..DollData::default() };
+        assert_eq!(decode(&encode(&data).unwrap()).unwrap().tag, data.tag);
+        // One saved before it had one gets one in its next tick.
+        let old = DollData { owner: 5, ..DollData::default() };
+        assert_eq!(decode(&encode(&old).unwrap()).unwrap().tag, 0);
+    }
 
     #[test]
     fn a_doll_loaded_again_is_one_doll() {
@@ -5083,6 +5205,7 @@ mod tests {
             favour: 4321,
             form_level: 3,
             giga: Some([-10, 63, 200]),
+            tag: 77,
         };
         assert_eq!(decode(&encode(&data).unwrap()).unwrap(), data);
         let data = DollData { owner: 7 << 64, ..DollData::default() };

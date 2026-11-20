@@ -1493,7 +1493,24 @@ fn near_owner(m: &Mob, cx: &Cx, s: &Seen) -> bool {
 }
 
 fn enemy(s: &Seen) -> bool {
-    (patrol_target(s) || touhou_attacker(s) || angry_golem(s)) && !is_doll(s.id)
+    (patrol_target(s) || touhou_attacker(s) || angry_golem(s)) && !off_limits(s)
+}
+
+/// Mounts players ride that the mob world can't tell from other mobs (a Magic Brooms broom is a
+/// wandering trader underneath): the api crate names them.
+static MOUNTS: LazyLock<Mutex<HashSet<u32>>> = LazyLock::new(Default::default);
+
+pub fn spare_mount(id: u32) {
+    if let Ok(mut m) = MOUNTS.lock() {
+        m.insert(id);
+    }
+}
+
+/// What no doll ever shoots or strikes: any player's doll (and any chicken, for a doll whose first
+/// tick hasn't said whose it is yet: dolls are chickens), a tamed or owned animal, and a mount such
+/// as a broom.
+fn off_limits(s: &Seen) -> bool {
+    is_doll(s.id) || s.species == Species::Chicken || s.tame || s.owner.is_some() || MOUNTS.lock().is_ok_and(|m| m.contains(&s.id))
 }
 
 /// An iron golem that has turned on the player: fighting dolls go for it like any hostile mob.
@@ -3173,7 +3190,7 @@ impl Snipe {
         match mark {
             Mark::Mob(id) => w
                 .seen(id)
-                .filter(|s| s.alive)
+                .filter(|s| s.alive && !off_limits(s))
                 .map(|s| (pos(s), [s.position.x, (s.position.y + s.eye_y) / 2.0, s.position.z])),
             Mark::Player(p) => {
                 let o = OWNERS.lock().ok()?.get(&p).copied()?;
@@ -3198,7 +3215,7 @@ impl Snipe {
         let range = Self::range(m);
         let from = here(m);
         if let Some(a) = my_attacker(m, cx)
-            && cx.w.seen(a).is_some_and(|s| snipe_reach(pos(s), from, range))
+            && cx.w.seen(a).is_some_and(|s| !off_limits(s) && snipe_reach(pos(s), from, range))
         {
             return Some(Mark::Mob(a));
         }
@@ -3207,7 +3224,7 @@ impl Snipe {
             .w
             .others
             .iter()
-            .filter(|s| s.id != m.id && s.alive && snipe_reach(pos(s), from, range))
+            .filter(|s| s.id != m.id && s.alive && !off_limits(s) && snipe_reach(pos(s), from, range))
             .filter(|s| {
                 if secret {
                     !spares(m.id, Who::Mob(s.id))
