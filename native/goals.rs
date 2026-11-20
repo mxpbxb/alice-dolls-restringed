@@ -4132,8 +4132,24 @@ fn is_treasure(name: &str) -> bool {
     matches!(short(name), "diamond_ore" | "deepslate_diamond_ore" | "ancient_debris")
 }
 
-/// Rock and earth a quarry leaves behind rather than drop by the hundred.
+/// Structure Add-on's rocks, and the cobble they break into. Not its bricks (made, not dug) or
+/// lignite (it drops coal).
+const STRUCTURE_ADDON_ROCKS: [&str; 39] = [
+    "andesite", "andesite_cobble", "basalt", "basalt_cobble", "black_granite", "black_granite_cobble",
+    "blueschist", "blueschist_cobble", "chalk", "chert", "dacite", "dacite_cobble", "dolomite",
+    "eclogite", "eclogite_cobble", "gabbro", "gabbro_cobble", "gneiss", "gneiss_cobble", "greenschist",
+    "greenschist_cobble", "greywacke", "komatiite", "komatiite_cobble", "limestone",
+    "marble", "marble_cobble", "migmatite", "migmatite_cobble", "quartzite", "quartzite_cobble",
+    "red_granite", "red_granite_cobble", "rhyolite", "rhyolite_cobble", "shale", "siltstone",
+    "soapstone", "soapstone_cobble",
+];
+
+/// Rock and earth a quarry leaves behind rather than drop by the hundred: the game's, and
+/// Structure Add-on's.
 fn is_filler(name: &str) -> bool {
+    if let Some(rock) = name.strip_prefix("structure_addon:") {
+        return STRUCTURE_ADDON_ROCKS.contains(&rock);
+    }
     matches!(
         short(name),
         "stone" | "cobblestone" | "deepslate" | "cobbled_deepslate" | "dirt" | "coarse_dirt" | "rooted_dirt"
@@ -4141,6 +4157,11 @@ fn is_filler(name: &str) -> bool {
             | "red_sandstone" | "tuff" | "granite" | "diorite" | "andesite" | "calcite" | "netherrack"
             | "basalt" | "smooth_basalt" | "blackstone" | "dripstone_block" | "clay" | "mud" | "terracotta"
     )
+}
+
+/// Whether a quarry voids `name` (with keep-rock off).
+pub fn voided(name: &str) -> bool {
+    is_filler(name)
 }
 
 fn centre(p: [i32; 3]) -> [f64; 3] {

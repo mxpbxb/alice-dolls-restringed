@@ -5040,6 +5040,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn structure_addon_rock_is_voided_like_stone() {
+        for rock in ["structure_addon:marble", "structure_addon:marble_cobble", "structure_addon:chalk", "structure_addon:gneiss_cobble"] {
+            assert!(goals::voided(rock), "{rock}");
+        }
+        assert!(goals::voided("minecraft:stone"));
+        // Its bricks are made, not dug, and what isn't rock is kept.
+        assert!(!goals::voided("structure_addon:marble_bricks"));
+        assert!(!goals::voided("structure_addon:lignite"));
+        assert!(!goals::voided("minecraft:diamond_ore"));
+    }
+
+    #[test]
     fn patchoulis_orb_hurts_no_doll() {
         let (mine, theirs, mob) = (900_301, 900_302, 900_399);
         goals::set_state(mine, goals::PATROL, true, 1);
