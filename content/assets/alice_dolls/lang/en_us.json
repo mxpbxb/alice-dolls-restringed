@@ -42,5 +42,6 @@
   "subtitles.alice_dolls.guignol_visit": "The Grand Guignol visits",
   "item.alice_dolls.yukari_doll": "Yukari Doll",
   "item.alice_dolls.patchouli_doll": "Patchouli Doll",
-  "item.alice_dolls.alice_doll": "Alice Doll"
+  "item.alice_dolls.alice_doll": "Alice Doll",
+  "entity.alice_dolls.doll": "Doll"
 }

@@ -8,7 +8,7 @@ levels, evolutions and new jobs.
 
 Install both from the release, then press Build in the launcher:
 
-- **`alice_dolls_native`** (`.hnmod`): the code. A native mod: it runs with your account's
+- **`alice_dolls_native`** (`.hmod`, native): the code. A native mod: it runs with your account's
   permissions, so the launcher asks before building it.
 - **`alice_dolls`** (`.hmod`): the doll items, recipes, names, sounds and textures.
 
@@ -84,10 +84,14 @@ head, and picks it up.
 
 ## Building
 
-`content/` is the content mod; build it with `cargo horizon-mod build`. `native/` is the native mod,
-built by the Horizon launcher (`native-build`), pinned to one Horizon revision: `api/` keeps each
-doll's owner, mode, inventory and love and draws its model, and the mixin files (`goals.rs` and the
-hooks) give the dolls their jobs.
+`content/` is the content mod; build it with `cargo horizon-mod build`. It also declares the doll
+mob, `alice_dolls:doll`: a mob of its own (a small ground mob's body, the doll's size), not a
+chicken, so nothing that hunts or herds chickens touches a doll.
+
+`native-sdk/` is the native mod for today's launcher (SDK packages, from 0.43.0): `src/` keeps each
+doll's owner, mode, inventory and love and draws its model, and `src/mixins/` (`goals.rs` and the
+hooks) gives the dolls their jobs. Pack it with `cargo horizon-mod build` against the Horizon SDK
+it pins; the launcher builds it (`native-build`). `native/` is the old `.hnmod` form, up to 0.42.7.
 
 ## Credits
 

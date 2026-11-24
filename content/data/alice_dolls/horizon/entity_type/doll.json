@@ -1,0 +1,18 @@
+{
+  "template": "minecraft:cat",
+  "body_size": [
+    0.4,
+    0.7,
+    0.644
+  ],
+  "shadow_radius": 0.3,
+  "attributes": {
+    "minecraft:movement_speed": 0.25
+  },
+  "sounds": {
+    "ambient": "none",
+    "hurt": "none",
+    "death": "none",
+    "step": "none"
+  }
+}
