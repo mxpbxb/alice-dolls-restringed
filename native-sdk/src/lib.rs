@@ -3440,7 +3440,7 @@ impl Mod {
             host.action_bar(player, Text::literal("Last 4 slots: armour (helmet last) · the one before: shield · the 3x3 below: baubles"));
         }
         if let Ok(mut views) = MENU_VIEWS.lock() {
-            views.insert(player, net::Menu { title, total: size, offset, view, empty: vec![false; view], switch_window: switch.then_some(window), big: Vec::new() });
+            views.insert(player, net::Menu { title, total: size, offset, view, empty: vec![false; view], switch_window: switch.then_some(window), big: Vec::new(), big_clicks: true });
         }
         goals::set_chest_open(Some(id));
         if let Some(doll) = doll_of(host, id) {
@@ -3455,7 +3455,7 @@ impl Mod {
             return;
         };
         if let Ok(mut views) = MENU_VIEWS.lock() {
-            let view = net::Menu { title: doll_menu::ENDER_TITLE.into(), total: 0, offset: 0, view: 27, empty: vec![false; 27], switch_window: None, big: Vec::new() };
+            let view = net::Menu { title: doll_menu::ENDER_TITLE.into(), total: 0, offset: 0, view: 27, empty: vec![false; 27], switch_window: None, big: Vec::new(), big_clicks: true };
             views.insert(player, view);
         }
     }
@@ -4000,9 +4000,12 @@ impl Hooks for Mod {
         }
         let mut handlers = reg.payload_handlers();
         let mut payloads = handlers.registrar("1");
-        for channel in [net::SCROLL, net::ROCK_SWITCH, net::ENDER, net::BIG_CLICK] {
+        for channel in [net::SCROLL, net::ROCK_SWITCH, net::ENDER] {
             payloads.play_to_server(mod_api::PayloadId(channel.into()), std::sync::Arc::new(DollPacket(channel)));
         }
+        // Optional: a client still joins a server from before 0.43.3, which hasn't got it (and
+        // then leaves Moscow's clicks to the game, see `big_clicks`).
+        payloads.optional().play_to_server(mod_api::PayloadId(net::BIG_CLICK.into()), std::sync::Arc::new(DollPacket(net::BIG_CLICK)));
         for channel in [net::FX, net::MENU, net::PHOTO] {
             payloads.play_to_client(mod_api::PayloadId(channel.into()), Some(std::sync::Arc::new(DollPacket(channel))));
         }
@@ -4190,7 +4193,9 @@ impl Hooks for Mod {
                     CLIENT_ENDER.store(true, std::sync::atomic::Ordering::Relaxed);
                     return Flow::Cancel;
                 }
-                if let Some(click) = moscow_click(&view, event.screen, event.button == 1, event.modifiers & 1 != 0) {
+                if view.big_clicks
+                    && let Some(click) = moscow_click(&view, event.screen, event.button == 1, event.modifiers & 1 != 0)
+                {
                     CLIENT_BIG.lock().ok().filter(|c| c.len() < 16).map(|mut c| c.push(click));
                     return Flow::Cancel;
                 }
