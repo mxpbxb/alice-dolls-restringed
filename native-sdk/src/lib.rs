@@ -5419,8 +5419,47 @@ impl Hooks for Mod {
                 }
             }
         }
-        if drawn { Flow::Cancel } else { Flow::Continue }
+        if drawn {
+            // Cancelling skips the name tag too, so the love meter is drawn here.
+            draw_favour_meter(host, event);
+            Flow::Cancel
+        } else {
+            Flow::Continue
+        }
     }
+}
+
+/// How far off a doll's love meter shows without looking at it, in blocks.
+const METER_RANGE: f64 = 6.0;
+/// The meter's height above a doll's feet, in blocks.
+const METER_HEIGHT: f32 = 1.35;
+
+/// The love meter a doll's name tag showed, drawn as vanilla draws a name tag: over its head,
+/// facing the camera, when it is looked at or near.
+fn draw_favour_meter(host: &dyn ClientHost, event: &mut RenderLivingPreEvent<'_>) {
+    let id = event.entity.id;
+    let Some((level, into, need)) = favour_shown(id) else { return };
+    let Some(doll) = doll_of(host, id) else { return };
+    let Some(camera) = host.camera() else { return };
+    let looked_at = matches!(host.crosshair_target(), Some(mod_api::CrosshairTarget::Entity { entity, .. }) if entity.id() == id);
+    let near = host.entity(id).and_then(|e| e.position(host)).is_some_and(|at| {
+        let d2: f64 = (0..3).map(|i| (camera.position[i] - at[i]).powi(2)).sum();
+        d2 < METER_RANGE * METER_RANGE
+    });
+    if !looked_at && !near {
+        return;
+    }
+    let text = Text::literal(favour_tag(doll.name, level, into, need));
+    let draw = &mut *event.draw;
+    draw.push();
+    draw.translate([0.0, METER_HEIGHT, 0.0]);
+    // The pose is turned with the body; turn the letters back to face the camera.
+    draw.rotate_about([0.0, 1.0, 0.0], event.entity.body_yaw - camera.yaw - 180.0, [0.0; 3]);
+    draw.rotate_about([1.0, 0.0, 0.0], -camera.pitch, [0.0; 3]);
+    draw.scale([0.025, -0.025, 0.025]);
+    let width = draw.text_width(&text).unwrap_or(0.0);
+    let _ = draw.text(&text, [-width / 2.0, 0.0], 0xFF_FF_FF, false, Some(0));
+    draw.pop();
 }
 
 #[cfg(test)]
