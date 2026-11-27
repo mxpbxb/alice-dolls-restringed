@@ -625,7 +625,63 @@ static DIED: LazyLock<Mutex<std::collections::HashSet<u32>>> = LazyLock::new(Def
 /// Doll `id` dies, whatever killed it (a mob, another doll, the void): its item and all it carried
 /// go to its owner, or drop where it fell when they can't take them, and it is forgotten, with any
 /// entry for it from an earlier load.
+/// What `dress` last gave each doll: its max health (as bits) and the four pieces it wears.
+static DRESSED: LazyLock<Mutex<HashMap<u32, (u32, [Option<ItemStack>; 4])>>> = LazyLock::new(Default::default);
+
+/// Where armour part 0 (the helmet) to 3 (the boots) is worn.
+const WORN: [mod_api::EquipmentSlot; 4] =
+    [mod_api::EquipmentSlot::Head, mod_api::EquipmentSlot::Chest, mod_api::EquipmentSlot::Legs, mod_api::EquipmentSlot::Feet];
+
+/// A doll's level and armour, on the doll mob itself (as `goals::wear_armour` and the levelled
+/// health of the pre-SDK mod did): its max health grows with its love level (a doll gets the new
+/// health in full), and what is in its armour slots, each only when it is that piece, is worn as its
+/// equipment, so it counts against every blow. Only what changed is written.
+fn dress(host: &mut dyn ServerHost, id: u32, doll: &Doll, items: &[Option<ItemStack>], level: u32) {
+    let n = items.len();
+    let want: [Option<ItemStack>; 4] = std::array::from_fn(|part| {
+        if n < goals::ARMOUR_SLOTS {
+            return None;
+        }
+        items[goals::armour_slot(n, part)].clone().filter(|s| goals::armour_part(&s.item) == Some(part))
+    });
+    let health = goals::levelled_health(health_of(doll), level);
+    let had = DRESSED.lock().ok().and_then(|d| d.get(&id).cloned());
+    if had.as_ref().is_some_and(|(h, w)| *h == health.to_bits() && *w == want) {
+        return;
+    }
+    let Some(living) = host.entity(id).and_then(|e| host.living(e)) else { return };
+    let base = living.attribute_base(host, "minecraft:max_health");
+    if base.is_none_or(|b| (b - f64::from(health)).abs() > 1e-3) {
+        living.set_attribute_base(host, "minecraft:max_health", f64::from(health));
+        living.set_health(host, health);
+    }
+    for (part, slot) in WORN.into_iter().enumerate() {
+        if had.as_ref().is_some_and(|(_, w)| w[part] == want[part]) {
+            continue;
+        }
+        let stack = want[part].as_ref().and_then(|s| s.to_game(host));
+        let _ = living.set_equipment(host, slot, stack);
+    }
+    DRESSED.lock().ok().map(|mut d| d.insert(id, (health.to_bits(), want)));
+}
+
+/// Takes off what `dress` put on, so a dying doll drops its armour only from its inventory.
+fn undress(host: &mut dyn ServerHost, id: u32) {
+    DRESSED.lock().ok().map(|mut d| d.remove(&id));
+    let Some(living) = host.entity(id).and_then(|e| host.living(e)) else { return };
+    for slot in WORN {
+        let _ = living.set_equipment(host, slot, None);
+    }
+}
+
+/// A doll's max health at its love level.
+fn levelled_health_of(host: &dyn Host, id: u32) -> f32 {
+    let base = doll_of(host, id).map_or(HEALTH, health_of);
+    goals::levelled_health(base, goals::level_of(id))
+}
+
 fn doll_dies(host: &mut dyn ServerHost, id: u32) -> Flow {
+    undress(host, id);
     let place = host.entity(id).and_then(|e| Some((e.level(host)?.dimension_id().to_owned(), e.position(host)?)));
     let tag = TAGS.lock().ok().and_then(|t| t.get(&id).copied());
     let saved = || -> Option<Known> {
@@ -4941,6 +4997,9 @@ impl Hooks for Mod {
         if let Ok(mut shown) = FAVOUR_SHOWN.lock() {
             shown.insert(id, (level, into, need));
         }
+        if let Some(doll) = doll_of(host, id) {
+            dress(host, id, doll, &data.items, level);
+        }
         goals::set_keep_rock(id, data.keep_rock);
         if GRID_OPEN.lock().is_ok_and(|g| g.is_empty()) && !BAUBLE_OPEN.lock().is_ok_and(|o| o.values().any(|(d, _)| *d == id)) {
             goals::set_baubles(id, worn_names(&data.baubles));
@@ -5286,9 +5345,9 @@ impl Hooks for Mod {
             return doll_dies(host, id);
         };
         let health = match &*bauble {
-            "alice_dolls:ultramarine_orb_elixir" => doll_of(host, id).map_or(HEALTH, health_of),
+            "alice_dolls:ultramarine_orb_elixir" => levelled_health_of(host, id),
             // Vanilla's totem leaves one health and regeneration; a doll, with no effects to take, gets a third.
-            "minecraft:totem_of_undying" => doll_of(host, id).map_or(HEALTH, health_of) / 3.0,
+            "minecraft:totem_of_undying" => levelled_health_of(host, id) / 3.0,
             _ => return doll_dies(host, id),
         };
         let Some(dimension) = host.entity(id).and_then(|e| e.level(host)).map(|l| l.dimension_id().to_owned()) else {
