@@ -7,6 +7,7 @@
   ],
   "shadow_radius": 0.3,
   "attributes": {
+    "minecraft:max_health": 30.0,
     "minecraft:movement_speed": 0.25
   },
   "sounds": {

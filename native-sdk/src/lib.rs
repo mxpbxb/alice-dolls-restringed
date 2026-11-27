@@ -18,6 +18,9 @@ mod model;
 mod doll_menu;
 pub use doll_menu::inventory_screen;
 mod net;
+mod joon;
+mod joon_play;
+mod joon_ui;
 mod players;
 pub mod stacks;
 pub mod goals;
@@ -128,7 +131,7 @@ const fn base(name: &'static str, item: &'static str, sprite: &'static str, held
     Doll { name, item, sprite, held, slots: DOLL_SLOTS, look: model::Look::Base }
 }
 
-static DOLLS: [Doll; 20] = [
+static DOLLS: [Doll; 21] = [
     base(goals::SHANGHAI, "alice_dolls:shanghai_doll", "alice_dolls:entity/shanghai", "minecraft:golden_sword"),
     base(goals::HORAI, "alice_dolls:horai_doll", "alice_dolls:entity/horai", "minecraft:golden_pickaxe"),
     base(goals::DIAMOND_HORAI, "alice_dolls:diamond_horai_doll", "alice_dolls:entity/horai", "minecraft:diamond_pickaxe"),
@@ -226,6 +229,15 @@ static DOLLS: [Doll; 20] = [
         slots: EXTRA_SLOTS,
         look: model::Look::Boxes(&model::ALICE),
     },
+    // Joon trades: a large chest of stock, and nothing to wear.
+    Doll {
+        name: goals::JOON,
+        item: "alice_dolls:joon_doll",
+        sprite: "alice_dolls:entity/joon",
+        held: "",
+        slots: joon::SLOTS,
+        look: model::Look::Boxes(&model::JOON),
+    },
 ];
 
 fn doll_named(name: &str) -> Option<&'static Doll> {
@@ -291,6 +303,8 @@ struct DollData {
     /// This doll's own id, saved with it and new each time a doll is placed: however often it is
     /// loaded again (under a new entity id), it is known as one doll by this. 0 until it is given one.
     tag: u64,
+    /// Joon's trades, as her owner set them.
+    trades: Vec<joon::Trade>,
 }
 
 impl Default for DollData {
@@ -310,6 +324,7 @@ impl Default for DollData {
             anchor: None,
             giga: None,
             tag: 0,
+            trades: Vec::new(),
         }
     }
 }
@@ -353,6 +368,9 @@ fn encode(data: &DollData) -> Result<Compound, AttachmentError> {
     }
     if data.tag != 0 {
         tag.insert("doll_id".into(), Tag::Long(data.tag as i64));
+    }
+    if !data.trades.is_empty() {
+        tag.insert("Trades".into(), joon::encode_trades(&data.trades));
     }
     Ok(tag)
 }
@@ -416,6 +434,7 @@ fn decode(tag: &Compound) -> Result<DollData, AttachmentError> {
             _ => None,
         },
         tag: long("doll_id").unwrap_or(0),
+        trades: joon::decode_trades(tag.get(&"Trades".into())),
     };
     fit_baubles(&mut data);
     Ok(data)
@@ -535,6 +554,11 @@ fn click(host: &mut dyn ServerHost, id: u32) {
 }
 
 fn tell_state(id: u32, data: &DollData) {
+    // Joon, out visiting, follows whoever she is with.
+    if let Some(target) = joon_play::visiting(id) {
+        goals::set_state(id, goals::FOLLOW, true, target);
+        return;
+    }
     goals::set_state(id, data.mode, data.enabled, data.owner);
     goals::set_giga_site(id, if data.mode == goals::GIGA { data.giga } else { None });
 }
@@ -569,6 +593,7 @@ struct Known {
     baubles: Vec<Option<ItemStack>>,
     favour: u32,
     form_level: u32,
+    trades: Vec<joon::Trade>,
 }
 
 static KNOWN: LazyLock<Mutex<HashMap<u32, Known>>> = LazyLock::new(Default::default);
@@ -584,6 +609,7 @@ fn remember(id: u32, doll: &'static Doll, data: &DollData) {
                 baubles: data.baubles.clone(),
                 favour: data.favour,
                 form_level: data.form_level,
+                trades: data.trades.clone(),
             },
         );
     }
@@ -639,7 +665,7 @@ const WORN: [mod_api::EquipmentSlot; 4] =
 fn dress(host: &mut dyn ServerHost, id: u32, doll: &Doll, items: &[Option<ItemStack>], level: u32) {
     let n = items.len();
     let want: [Option<ItemStack>; 4] = std::array::from_fn(|part| {
-        if n < goals::ARMOUR_SLOTS {
+        if n < goals::ARMOUR_SLOTS || doll.name == goals::JOON {
             return None;
         }
         items[goals::armour_slot(n, part)].clone().filter(|s| goals::armour_part(&s.item) == Some(part))
@@ -687,7 +713,7 @@ fn doll_dies(host: &mut dyn ServerHost, id: u32) -> Flow {
     let saved = || -> Option<Known> {
         let doll = doll_of(host, id)?;
         let d = DOLL.get(host, Holder::Entity(id)).into_iter().next()?;
-        Some(Known { doll, owner: d.owner, items: d.items, baubles: d.baubles, favour: d.favour, form_level: d.form_level })
+        Some(Known { doll, owner: d.owner, items: d.items, baubles: d.baubles, favour: d.favour, form_level: d.form_level, trades: d.trades })
     };
     let Some(mut k) = forget(id).or_else(saved) else { return Flow::Continue };
     if let Some(live) = goals::inventory(id) {
@@ -879,6 +905,11 @@ fn belongings(k: &Known) -> Vec<ItemStack> {
     if k.favour > 0 {
         let data = item.extra.get_or_insert_with(|| Box::new(StackData::default()));
         data.container.push((FAVOUR_IN_ITEM, favour_marker(k.favour, k.form_level)));
+    }
+    let trades = joon::trades_to_item(&k.trades);
+    if !trades.is_empty() {
+        let data = item.extra.get_or_insert_with(|| Box::new(StackData::default()));
+        data.container.extend(trades);
     }
     vec![item]
 }
@@ -2253,6 +2284,7 @@ impl Mod {
                         baubles: data.baubles.clone(),
                         favour: data.favour,
                         form_level: data.form_level,
+                        trades: data.trades.clone(),
                     };
                     let Some(stack) = belongings(&k).into_iter().next() else { return };
                     if host.give_doll_stack(uuid, stack).is_some() {
@@ -2496,6 +2528,7 @@ impl Mod {
             baubles: lost.baubles.clone(),
             favour: lost.favour,
             form_level: lost.form_level,
+            trades: lost.trades.clone(),
         };
         let Some(stack) = belongings(&k).into_iter().next() else { return };
         if !remove_entity(host, &dimension, hurt) {
@@ -2762,6 +2795,15 @@ impl Mod {
         }
         let mut data = DOLL.get(host, holder).unwrap_or_default();
         let name = doll_of(host, id).map_or("Doll", |d| d.name);
+        // Joon out visiting: the one she is with gets her trade offer; no one else gets anything.
+        if name == goals::JOON && let Some(target) = joon_play::visiting(id) {
+            if player.uuid == target {
+                joon_play::PENDING_JOON.lock().ok().map(|mut p| p.push((player.uuid, id, joon_play::View::Trade)));
+            } else {
+                host.action_bar(player.uuid, Text::literal(format!("{name} : I'm busy visiting someone")));
+            }
+            return Flow::Cancel;
+        }
         // A doll takes orders from the player who made it, and no one else: not even with a Doll Core.
         if data.owner != player.uuid {
             let text = format!("{name} : You are not my owner!");
@@ -2770,6 +2812,17 @@ impl Mod {
         }
         // Whether the player who clicked is sneaking (not whoever a doll last saw).
         let sneaking = player.sneaking;
+        // Joon has no modes, armour or baubles: her owner's click opens her trades, but for her
+        // inventory (a chest), her chat (a book), experience (a glass bottle), favour, and picking
+        // her up (sneaking, empty-handed).
+        if name == goals::JOON
+            && !(sneaking && held.is_none())
+            && !matches!(held, Some("minecraft:chest" | "minecraft:book" | "minecraft:glass_bottle" | "minecraft:name_tag"))
+            && !held.is_some_and(|h| point_favour(h).is_some())
+        {
+            joon_play::PENDING_JOON.lock().ok().map(|mut p| p.push((player.uuid, id, joon_play::View::Edit)));
+            return Flow::Cancel;
+        }
         // Yukari is her owner's portable gap: an empty-handed click is Yukari Gaps' to open its
         // travel screen with.
         if name == goals::YUKARI && held.is_none() && !sneaking {
@@ -2880,6 +2933,7 @@ impl Mod {
                     baubles: data.baubles.clone(),
                     favour: data.favour,
                     form_level: data.form_level,
+                    trades: data.trades.clone(),
                 };
                 give_or_drop(host, &player, belongings(&k));
             }
@@ -3318,7 +3372,7 @@ impl Mod {
             .lock()
             .map(|k| {
                 k.iter()
-                    .filter(|(o, k)| **o != id && k.owner == data.owner && k.doll.name != goals::RUSSIA && k.doll.name != goals::MOSCOW)
+                    .filter(|(o, k)| **o != id && k.owner == data.owner && k.doll.name != goals::RUSSIA && k.doll.name != goals::MOSCOW && k.doll.name != goals::JOON)
                     .map(|(o, _)| *o)
                     .collect()
             })
@@ -3469,10 +3523,11 @@ impl Mod {
         let size = items.len();
         let name = doll_of(host, id).map_or("Doll", |d| d.name);
         let switch = size > 0 && has_rock_switch(name);
+        let joon = name == goals::JOON;
         // An inventory too long for the screen with the bauble grid under it (Russia's, Moscow's)
-        // shows three rows at a time, scrolled with the mouse wheel.
+        // shows three rows at a time, scrolled with the mouse wheel. Joon has no grid: all six.
         let rows_total = size.div_ceil(9);
-        let view_rows = rows_total.min(3 - usize::from(switch));
+        let view_rows = if joon { rows_total.min(6) } else { rows_total.min(3 - usize::from(switch)) };
         let scrolls = view_rows < rows_total;
         let top = if scrolls {
             SCROLL.lock().ok().and_then(|s| s.get(&player).copied()).unwrap_or(0).min(rows_total - view_rows)
@@ -3492,7 +3547,7 @@ impl Mod {
         OPEN.lock().ok().map(|mut open| open.insert(player, (id, window)));
         GRID_OPEN.lock().ok().map(|mut grid| grid.insert(player, (offset, view)));
         OUTLINES_LOGGED.store(false, std::sync::atomic::Ordering::Relaxed);
-        if size > goals::ARMOUR_SLOTS + 1 {
+        if size > goals::ARMOUR_SLOTS + 1 && !joon {
             host.action_bar(player, Text::literal("Last 4 slots: armour (helmet last) · the one before: shield · the 3x3 below: baubles"));
         }
         if let Ok(mut views) = MENU_VIEWS.lock() {
@@ -3786,8 +3841,13 @@ impl Mod {
             anchor,
             favour,
             form_level,
-            // Alice patrols from the moment she is placed.
-            mode: if doll.name == goals::ALICE { goals::PATROL } else { goals::STANDBY },
+            // Alice patrols from the moment she is placed; Joon follows.
+            mode: match doll.name {
+                goals::ALICE => goals::PATROL,
+                goals::JOON => goals::FOLLOW,
+                _ => goals::STANDBY,
+            },
+            trades: joon::trades_from_item(taken.container()),
             tag: new_tag(),
             ..DollData::default()
         };
@@ -3870,6 +3930,7 @@ fn receive_doll_packet(channel: &str, data: &[u8]) {
                 *c = menu;
             }
         }
+        net::JOON => joon_ui::receive(data),
         net::PHOTO => {
             if let Some((eye, yaw, pitch)) = net::decode_photo(data)
                 && let Ok(mut p) = CLIENT_PHOTOS.lock()
@@ -3919,6 +3980,14 @@ impl mod_api::IPayloadHandler for DollPacket {
                 && switched.len() < 64
             {
                 switched.insert(player.uuid(), i32::from_le_bytes(window));
+            }
+        } else if self.0 == net::JOON_ACT {
+            if let Ok(player) = context.player()
+                && let Some(act) = net::decode_joon_act(&bytes.0)
+                && let Ok(mut acts) = joon_play::ACTS.lock()
+                && acts.len() < 256
+            {
+                acts.push((player.uuid(), act));
             }
         } else if context.client_host().is_ok() {
             receive_doll_packet(self.0, &bytes.0);
@@ -4065,6 +4134,9 @@ impl Hooks for Mod {
         for channel in [net::FX, net::MENU, net::PHOTO] {
             payloads.play_to_client(mod_api::PayloadId(channel.into()), Some(std::sync::Arc::new(DollPacket(channel))));
         }
+        // Joon's screens: optional, so a client without it still joins.
+        payloads.optional().play_to_client(mod_api::PayloadId(net::JOON.into()), Some(std::sync::Arc::new(DollPacket(net::JOON))));
+        payloads.optional().play_to_server(mod_api::PayloadId(net::JOON_ACT.into()), std::sync::Arc::new(DollPacket(net::JOON_ACT)));
     }
 
     /// Marisa's stars and Reimu's amulets, as danmaku facing the camera: a star a yellow glow with a
@@ -4167,14 +4239,25 @@ impl Hooks for Mod {
         let stack = event.stack.and_then(|stack| ItemStack::from_game(host, stack));
         let held = stack.as_ref().map(|stack| stack.item.as_str());
         let id = u32::try_from(event.entity).ok()?;
-        let _ = self.interact_doll(host, id, held, stack.as_ref());
+        // A click the doll leaves to another mod (Yukari's empty-handed click, Yukari Gaps' travel
+        // screen) is left unclaimed, so that mod's own hook gets it.
+        if matches!(self.interact_doll(host, id, held, stack.as_ref()), Flow::Continue)
+            && known(id).is_some_and(|k| k.doll.name == goals::YUKARI)
+        {
+            return None;
+        }
         // Whatever the doll made of it, its body is not tamed, sat down or fed.
         Some(InteractionResult::SuccessServer)
     }
 
-    /// The outlines of a doll's armour and shield slots, where they are empty, as vanilla draws them
-    /// in the player's own inventory and Touhou Little Maid in its maid's.
+    /// Joon's screen (the mod's own); and the outlines of a doll's armour and shield slots, where
+    /// they are empty, as vanilla draws them in the player's own inventory and Touhou Little Maid
+    /// in its maid's.
     fn screen_render_post(&self, host: &dyn ClientHost, event: &mut ScreenRenderPostEvent<'_>) {
+        if joon_ui::ours(host, event.screen.id) {
+            joon_ui::draw(host, event.draw, event.screen.rect, event.screen.mouse);
+            return;
+        }
         let Some(net::Menu { title: name, total: size, offset, view, empty, big, .. }) = CLIENT_MENU.lock().ok().and_then(|v| v.clone()) else {
             return;
         };
@@ -4191,7 +4274,7 @@ impl Hooks for Mod {
                 event.draw.gui_draw_item_with(&stack, [sx, sy], Some(&short_count(*count)));
             }
         }
-        if size <= goals::ARMOUR_SLOTS {
+        if size <= goals::ARMOUR_SLOTS || name.starts_with(goals::JOON) {
             return;
         }
         let first = !OUTLINES_LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed);
@@ -4217,10 +4300,17 @@ impl Hooks for Mod {
     }
 
     fn screen_mouse_dragged_pre(&self, host: &dyn ClientHost, event: &mut mod_api::ScreenMouseDraggedPreEvent<'_>) -> Flow {
+        if joon_ui::ours(host, event.screen.id) {
+            return Flow::Cancel;
+        }
         if on_doll_screen(host, event.screen) { Flow::Cancel } else { Flow::Continue }
     }
 
     fn screen_key_pressed_pre(&self, host: &dyn ClientHost, event: &mut mod_api::ScreenKeyPressedPreEvent<'_>) -> Flow {
+        // On Joon's screen every key but Escape is hers: the inventory key doesn't close it.
+        if joon_ui::ours(host, event.screen.id) {
+            return if event.key == "key.keyboard.escape" { Flow::Continue } else { Flow::Cancel };
+        }
         let k = event.key.strip_prefix("key.keyboard.").unwrap_or("");
         let moves_items = matches!(k, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "f" | "q");
         if moves_items && on_doll_screen(host, event.screen) { Flow::Cancel } else { Flow::Continue }
@@ -4231,6 +4321,10 @@ impl Hooks for Mod {
         host: &dyn ClientHost,
         event: &mut mod_api::ScreenMouseButtonPressedPreEvent<'_>,
     ) -> Flow {
+        if joon_ui::ours(host, event.screen.id) {
+            joon_ui::pressed(event.screen.rect, event.screen.mouse, event.button, event.modifiers & 1 != 0);
+            return Flow::Cancel;
+        }
         if on_doll_screen(host, event.screen) {
             let now = Instant::now();
             let last = LAST_PRESS.lock().ok().and_then(|mut l| l.replace(now));
@@ -4280,6 +4374,10 @@ impl Hooks for Mod {
 
     /// The mouse wheel over a doll screen that scrolls: a row up or down.
     fn screen_mouse_scrolled_pre(&self, host: &dyn ClientHost, event: &mut ScreenMouseScrolledPreEvent<'_>) -> Flow {
+        if joon_ui::ours(host, event.screen.id) {
+            joon_ui::scrolled(event.screen.rect, event.screen.mouse, event.scroll[1]);
+            return Flow::Cancel;
+        }
         let Some(view) = CLIENT_MENU.lock().ok().and_then(|v| v.clone()) else { return Flow::Continue };
         let scrolls = view.view < view.total;
         if !scrolls || event.screen.title.is_none_or(|t| host.text_string(t).ok().as_deref() != Some(view.title.as_str())) || event.scroll[1] == 0.0 {
@@ -4295,6 +4393,7 @@ impl Hooks for Mod {
 
     /// Aya's photos worth keeping: a screenshot each, as the original saved.
     fn client_tick_post(&self, host: &mut dyn ClientHost, _: &mut ClientTickPostEvent) {
+        joon_ui::tick(host);
         // Her photo taken: the HUD as it was.
         let pov_over = AYA_POV.lock().is_ok_and(|p| p.is_none());
         if pov_over && let Some(mode) = AYA_HUD.lock().ok().and_then(|mut h| h.take()) {
@@ -4529,6 +4628,9 @@ impl Hooks for Mod {
             host.action_bar(player.uuid, Text::literal(format!("{} : You are not my owner!", doll.name)));
             return Flow::Cancel;
         }
+        if joon_play::is_visiting(id) {
+            return Flow::Cancel;
+        }
         forget(id);
         remove_entity(host, &player.dimension, id);
         if data.xp > 0 {
@@ -4542,6 +4644,7 @@ impl Hooks for Mod {
             baubles: data.baubles.clone(),
             favour: data.favour,
             form_level: data.form_level,
+            trades: data.trades.clone(),
         };
         give_or_drop(host, &player, belongings(&k));
         Flow::Cancel
@@ -4613,6 +4716,11 @@ impl Hooks for Mod {
         for player in alices {
             self.open_alice(host, player);
         }
+        let joons: Vec<(u128, u32, joon_play::View)> = joon_play::PENDING_JOON.lock().map(|mut p| std::mem::take(&mut *p)).unwrap_or_default();
+        for (player, doll, view) in joons {
+            self.at_doll(host, doll, ORDER_WAIT, Box::new(move |m: &Mod, host: &mut dyn ServerHost| m.open_joon(host, player, doll, view)));
+        }
+        self.joon_tick(host);
         self.send_fx(host, &players);
         // Doll screens: each viewer's client told of theirs when it changes, and when it closes.
         count_big(host);
@@ -4845,6 +4953,9 @@ impl Hooks for Mod {
         }
         if MISSIONS.lock().is_ok_and(|m| m.contains_key(&event.entity)) {
             self.mission_tick(host, event.entity);
+        }
+        if joon_play::is_visiting(event.entity) {
+            self.visit_tick(host, event.entity);
         }
         let asked: Vec<(u128, u32)> = PENDING_BAUBLES.lock().map(|mut p| std::mem::take(&mut *p)).unwrap_or_default();
         for (player, doll) in asked {
@@ -5214,6 +5325,10 @@ impl Hooks for Mod {
         if event.kind == KIND
             && u32::try_from(event.entity).ok().and_then(known).is_some_and(|k| k.doll.name == goals::GRAND_GUIGNOL)
         {
+            return Flow::Cancel;
+        }
+        // Joon, out trading, can't be hurt by anything.
+        if event.kind == KIND && u32::try_from(event.entity).is_ok_and(joon_play::is_visiting) {
             return Flow::Cancel;
         }
         // A doll never drowns.
@@ -5668,6 +5783,7 @@ mod tests {
             form_level: 3,
             giga: Some([-10, 63, 200]),
             tag: 77,
+            trades: vec![joon::Trade { cost: [Some(ItemStack::new("minecraft:emerald", 3)), None], result: Some(ItemStack::new("minecraft:bread", 2)) }],
         };
         assert_eq!(decode(&encode(&data).unwrap()).unwrap(), data);
         let data = DollData { owner: 7 << 64, ..DollData::default() };
@@ -5727,6 +5843,7 @@ mod tests {
             (goals::YUKARI, "alice_dolls:yukari_doll"),
             (goals::PATCHOULI, "alice_dolls:patchouli_doll"),
             (goals::ALICE, "alice_dolls:alice_doll"),
+            (goals::JOON, "alice_dolls:joon_doll"),
         ] {
             assert_eq!(doll_named(name).map(|d| d.item), Some(item));
             assert!(goals::is_doll_item(item));
@@ -5802,6 +5919,7 @@ mod tests {
             baubles: vec![None; goals::BAUBLE_SLOTS],
             favour: 777,
             form_level: 3,
+            trades: Vec::new(),
         };
         let item = &belongings(&k)[0];
         assert_eq!(favour_in(item), (777, 3));

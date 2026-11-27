@@ -14,14 +14,14 @@ Install both from the release, then press Build in the launcher:
 
 ## Dolls
 
-Each recipe is the item in the top left, wool (Goliath: iron blocks), and a Doll Core in the middle. Patchouli and Alice also take three diamonds, in the other corners.
+Each recipe is the item in the top left, wool (Goliath: iron blocks), and a Doll Core in the middle. Patchouli and Alice also take three diamonds, in the other corners. Joon is a Doll Core ringed with gold and emerald blocks, gold in the corners.
 
 | Doll | Crafted with | What it does |
 |---|---|---|
 | Shanghai | golden sword | Fights hostile mobs, shears sheep, reports the mobs around it. Evolves into Goliath |
 | Horai | golden pickaxe | Finds ore (ancient debris too) and digs to it. Evolves into Diamond, then Netherite Horai, which earns no love for digging, only 5 for each quarry finished, a whole level for each giga quarry, and 10 for each diamond she digs out of either, and waits four seconds before heading off to its quarry so you can give it another order. Sneak and right-click any Horai with a golden pickaxe for the giga quarry: a 20x20 pit round where she stands, dug layer by layer down to bedrock. When it is done, or you give her another order, she leaves a line of ladders down the pit's wall from the corner where she began |
 | Ooedo | TNT | Walks up to hostile mobs and explodes; no explosion hurts it |
-| Germany | golden axe | Finds trees and chops them down |
+| Germany | golden axe | Finds trees and chops them down, half as quick again as an axe, stump and all; with a sapling of that wood in her inventory she plants it where the tree stood |
 | London | eye of ender | Reports the spawners above and below it |
 | Russia | chest | 36 slots: picks up what is dropped around it, lights dark places with torches; bound to another doll with a lead, follows it. Evolves into Moscow |
 | Moscow | (from Russia) | 54 slots of 128, one slot and two to a stack more for each level after it evolves (to 64 slots). Follows the doll it is bound to and takes what it gathers |
@@ -30,10 +30,11 @@ Each recipe is the item in the top left, wool (Goliath: iron blocks), and a Doll
 | Aya | feather | Takes photos (real screenshots, from her eyes, with no HUD); punch her with an empty hand for one of you. Riding on your head she gives you Speed II, and two levels more for each other Aya riding you |
 | Wakasagi | tropical fish | Fishes; give her a fishing rod and she fishes with it and its enchantments. From love level 3 she fishes with at least Lure III and Luck of the Sea III of her own |
 | Goliath | diamond sword, iron blocks | Nearly three blocks tall: fights, knocks back, wears the armour in its first slots. Evolves into Netherite Goliath |
-| Yuuka | sunflower | Tills, plants and harvests, replanting; farmland trampled near her in the last five minutes she tills and plants again. |
+| Yuuka | sunflower | Tills, plants and harvests, replanting; cuts cactus, sugar cane and bamboo down to their bottom block, which grows again; farmland trampled near her in the last five minutes she tills and plants again. |
 | Yukari | ender pearl | Follows you, her one mode, and leaves mobs and dropped items alone. She is a quarter taller than the other dolls. With [Yukari Gaps](https://github.com/mxpbxb/yukari-gaps) she is your portable gap: right-click her empty-handed for the travel screen, and she comes through after you. She is no gap to travel to |
 | Patchouli | book | A sniper: one slow, heavy orb every four seconds at hostile mobs up to 64 blocks off. She walks at two thirds of a doll's pace, and riding on your head she slows you. |
 | Alice | string | Right-click her with an empty hand for her panel: all your other dolls, wherever they are, with what each is doing, its love level and how far off it is. Tick dolls, then set them to Standby, Patrol, Follow or Rideon, turn their work AI on or off, ring them back as the bell does, open one's inventory from afar, send their items to another doll, or put them in your inventory as their items (any that don't fit come to you instead). She patrols from the moment she is placed |
+| Joon | gold and emerald blocks | A trader with a large chest of stock (54 slots) and no armour or baubles. She follows from the moment she is placed. Right-click her for her screen, with two tabs. **Trades**: up to twelve, villager style, anything for anything (either side may be left empty, for a gift). Pick a trade from the list and one of its slots, then click one of your items to put it in (right-click puts in one); set the count with - and + or the mouse wheel. **Her stock** opens her inventory: fill it with what she pays out. **Send**: the players in your dimension; click one to send her. She appears at their side and follows them for 200 seconds, and nothing can hurt her meanwhile. They right-click her for her trade offer and click Trade (shift-click to trade as many times as they can); what they pay goes into her inventory, and a trade she is out of is crossed out. They can send her home at any time. She can't visit the same player again for 300 seconds; you can send her to yourself whenever you like, to try her trades |
 
 Fighting dolls go first for whatever is attacking them, and go for iron golems that turn on you. A Goliath under half its health hits twice
 as hard, and a hostile mob it strikes turns on it rather than on its owner. When a doll is down to
