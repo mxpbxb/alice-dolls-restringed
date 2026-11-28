@@ -34,7 +34,7 @@ Each recipe is the item in the top left, wool (Goliath: iron blocks), and a Doll
 | Yukari | ender pearl | Follows you, her one mode, and leaves mobs and dropped items alone. She is a quarter taller than the other dolls. With [Yukari Gaps](https://github.com/mxpbxb/yukari-gaps) she is your portable gap: right-click her empty-handed for the travel screen, and she comes through after you. She is no gap to travel to |
 | Patchouli | book | A sniper: one slow, heavy orb every four seconds at hostile mobs up to 64 blocks off. She walks at two thirds of a doll's pace, and riding on your head she slows you. |
 | Alice | string | Right-click her with an empty hand for her panel: all your other dolls, wherever they are, with what each is doing, its love level and how far off it is. Tick dolls, then set them to Standby, Patrol, Follow or Rideon, turn their work AI on or off, ring them back as the bell does, open one's inventory from afar, send their items to another doll, or put them in your inventory as their items (any that don't fit come to you instead). She patrols from the moment she is placed |
-| Joon | gold and emerald blocks | A trader with a large chest of stock (54 slots) and no armour or baubles. She follows from the moment she is placed. Right-click her for her screen, with two tabs. **Trades**: up to twelve, villager style, anything for anything (either side may be left empty, for a gift). Pick a trade from the list and one of its slots, then click one of your items to put it in (right-click puts in one), or switch to **All items** and type to search every item in the game (`water_bucket`, or a whole id such as `minecraft:water_bucket`; Enter takes the first found); set the count with - and + or the mouse wheel. **Her stock** opens her inventory: fill it with what she pays out. **Send**: the players in your dimension; click one to send her. She appears at their side and follows them for 200 seconds, and nothing can hurt her meanwhile. They right-click her for her trade offer and click Trade (shift- or right-click to trade as many times as they can pay and she has stock for); what they pay goes into her inventory, and a trade she is out of is crossed out. They can send her home at any time. She can't visit the same player again for 300 seconds; you can send her to yourself whenever you like, to try her trades |
+| Joon | gold and emerald blocks | A trader with a large chest of stock (54 slots) and no armour or baubles. She follows from the moment she is placed. Right-click her for her screen, with two tabs. **Trades**: up to twelve, villager style, anything for anything: each takes up to four stacks and gives up to four, all at once (either side may be left empty, for a gift). Pick a trade from the list and one of its slots, then click one of your items to put it in (right-click puts in one), or switch to **All items** and type to search every item in the game (`water_bucket`, or a whole id such as `minecraft:water_bucket`; Enter takes the first found); set the count with - and + or the mouse wheel. **Her stock** opens her inventory: fill it with what she pays out. **Send**: the players in your dimension; click one to send her. She appears at their side and follows them for 200 seconds, and nothing can hurt her meanwhile. They right-click her for her trade offer and click Trade (shift- or right-click to trade as many times as they can pay and she has stock for); what they pay goes into her inventory, and a trade she is out of is crossed out. They can send her home at any time. She can't visit the same player again for 300 seconds; you can send her to yourself whenever you like, to try her trades |
 
 Fighting dolls go first for whatever is attacking them, and go for iron golems that turn on you. A Goliath under half its health hits twice
 as hard, and a hostile mob it strikes turns on it rather than on its owner. When a doll is down to
@@ -42,6 +42,8 @@ under 30% of its health, every doll within 16 blocks fights whoever hurt it (tho
 otherwise too), and if its owner is not within 24 blocks the nearest of the owner's dolls within 8
 picks it up and carries it as its item, with all it carries. A doll emptying itself into the chest
 keeps its first stack of food.
+
+Armour in a doll's armour slots (its last four) counts against every blow, as a player's does.
 
 Horai dolls mine coal and iron as with Fortune III (the rest with Silk Touch).
 
@@ -77,8 +79,8 @@ times. Dolls never drown. Russia and Moscow move twice as fast as other dolls. T
 for each quarter hour they follow the doll they are bound to.
 Each level takes three quarters more than the last, and gives 3 more attack and 5 more health, each
 then 10% more, and makes the working dolls faster and stronger: mining, blasting, farming and fishing.
-Every three levels, a doll with a next form evolves. A doll's name tag shows its level and how far it
-is to the next.
+Every three levels, a doll with a next form evolves. A doll's name tag shows its level, how far it
+is to the next, and its health.
 
 A doll that kills a zombie, skeleton, creeper, wither skeleton, piglin or the ender dragon gets its
 head, and picks it up.
