@@ -50,7 +50,7 @@ Horai dolls mine coal and iron as with Fortune III (the rest with Silk Touch).
 A doll belongs to the player who placed it: it follows, rides and takes orders from them alone, and
 only they can pick it up, even with a Doll Core.
 
-Right-click a doll empty-handed to switch modes (Standby, Patrol, Follow, Rideon); with a Doll Core
+Right-click a doll empty-handed to switch modes (Standby, Patrol, Follow, Rideon; on Standby it stays on the block where it was set to Standby, and is put back on it if knocked off); with a Doll Core
 to turn its AI on or off; with a chest to open its inventory. Ring the doll bell to pick which of your
 dolls come back to you (tick them, then ring from the screen); sneak and ring it to bring them all. Sneak and right-click it empty-handed
 to pick it up: like a shulker box, its item keeps its inventory, love and experience. A doll on
