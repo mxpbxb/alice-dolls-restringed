@@ -737,7 +737,7 @@ pub(crate) fn draw(host: &dyn ClientHost, d: &mut dyn DrawContext, window: Rect,
 fn draw_trades(host: &dyn ClientHost, d: &mut dyn DrawContext, v: &JoonView, o: [f32; 2], mouse: [f32; 2], (chosen, part, top): (usize, u8, usize), s: &Search, tip: &mut Option<String>) {
     label(d, "Joon's trades", [o[0] + 8.0, o[1] + 8.0], LABEL);
     right_label(d, "Click one to edit it", o[0] + PW - 8.0, o[1] + 8.0, DIM);
-    label(d, "Her trades", [o[0] + 8.0, o[1] + 20.0], DIM);
+    label(d, &format!("Her trades ({}/{MAX_TRADES})", v.trades.iter().filter(|t| t.parts.iter().any(Option::is_some)).count()), [o[0] + 8.0, o[1] + 20.0], DIM);
     let rows = trade_rows(v);
     for r in 0..TRADE_ROWS {
         let i = top + r;
@@ -923,7 +923,11 @@ fn draw_send(d: &mut dyn DrawContext, v: &JoonView, o: [f32; 2], mouse: [f32; 2]
 
 fn draw_offer(host: &dyn ClientHost, d: &mut dyn DrawContext, v: &JoonView, o: [f32; 2], mouse: [f32; 2], top: usize, tip: &mut Option<String>) {
     panel(d, [o[0], o[1], PW, PH]);
-    let title = fit(d, &format!("Trade offer from {}", v.owner), PW - 60.0);
+    let title = match v.trades.len() {
+        n @ 2.. => format!("{n} trades from {}", v.owner),
+        _ => format!("Trade offer from {}", v.owner),
+    };
+    let title = fit(d, &title, PW - 60.0);
     label(d, &title, [o[0] + 8.0, o[1] + 8.0], LABEL);
     right_label(d, &clock(v.secs), o[0] + PW - 8.0, o[1] + 8.0, LABEL);
     label(d, "Shift- or right-click Trade: trade all you can", [o[0] + 8.0, o[1] + 20.0], DIM);
